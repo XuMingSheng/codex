@@ -1,21 +1,38 @@
-## Current refactor goal
+## Next goal: tree-structured prompt context overlay
 
-Separate the `/context` overlay logic from backtracking logic. Only the shared, feature-neutral overlay plumbing (draw/key dispatch, close detection) should live in a neutral router. Backtrack rollback logic stays in backtrack modules; `/context` save/cancel and prompt-context updates stay in context modules.
+Summaries and grouping should be reusable, so introduce a new crate dedicated to constructing the hierarchical prompt context tree. Codex continues recording `ResponseItem`s as before, but after each new user task it also calls an LLM to summarize per-task and per-turn details, yielding a structure like:
 
-## Refactor plan for overlay separation
+```
+{
+  "title": "task title",
+  "type": "task",
+  "summary": "task overview",
+  "children": [
+    {
+      "title": "turn title",
+      "type": "turn",
+      "summary": "turn result",
+      "raw": { /* original ResponseItem */ },
+      "children": [ ... ]
+    }
+  ]
+}
+```
 
-1) Extract a neutral overlay router module
-   - APIs: `forward_overlay_event(&mut Option<Overlay>, &mut Tui, TuiEvent) -> Result<bool>` (generic close detection) and `close_overlay(&mut Tui, &mut Option<Overlay>)` (alt-screen teardown only).
-   - No knowledge of backtrack or context; no branching on `Overlay` variants beyond `is_done` and forwarding `handle_event`.
+Requirements:
 
-2) Keep backtrack-specific behavior isolated
-   - `app_backtrack.rs` retains preview/highlight, rollback confirmation, Esc/Enter handling, and transcript overlay state.
-   - Backtrack handles overlay close results that matter to rollback only; no context awareness.
+1) **Independent tree builder crate**
+   - New crate builds the hierarchical structure from recorded history plus LLM-generated summaries.
+   - Encapsulate schema and allow future experimentation without touching core logic.
 
-3) Keep `/context` behavior isolated
-   - `context_overlay.rs` handles save/cancel keys and stores pending `PromptContextSelection` updates.
-   - A small context handler (new file if needed) consumes close events and emits `Op::PromptContextUpdate` on save; no backtrack logic.
+2) **Core integration**
+   - After each new user message, record history items as today, then invoke the tree builder to produce/update the hierarchical view using the summarization model.
+   - Persist selection state per tree node; toggling a parent affects its descendants.
 
-4) Wire `App` to the neutral router
-   - `app.rs` calls the router for generic event forwarding/close detection, then delegates to either backtrack code or context handler based on the active overlay variant.
-   - Remove context-specific update sending from `app_backtrack.rs`; remove backtrack logic from context paths.
+3) **TUI overlay updates**
+   - `/context` overlay renders the tree with collapsible nodes (collapsed by default).
+   - Navigation shows node summaries in the detail pane; allow expanding/collapsing recursively.
+   - Toggling a node toggles all children in one action.
+
+4) **Schema evolution**
+   - Keep the overlay rendering logic decoupled from the tree builder so schema changes (different grouping, additional metadata) can be accommodated without large TUI rewrites.
