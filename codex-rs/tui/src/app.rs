@@ -3,6 +3,8 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
+use crate::context_overlay::ExitAction;
+use crate::context_overlay_handler;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
 use crate::file_search::FileSearchManager;
@@ -529,12 +531,11 @@ impl App {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }
             AppEvent::PromptContext { items } => {
-                if self.overlay.is_some() {
-                    self.close_transcript_overlay(tui);
-                }
-                let _ = tui.enter_alt_screen();
-                self.overlay = Some(Overlay::new_context(items));
-                tui.frame_requester().schedule_frame();
+                context_overlay_handler::open_or_update_context_overlay(
+                    &mut self.overlay,
+                    tui,
+                    items,
+                );
             }
             AppEvent::ExitRequest => {
                 return Ok(false);
@@ -959,6 +960,25 @@ impl App {
                 // Ignore Release key events.
             }
         };
+    }
+
+    pub(crate) fn handle_overlay_closed(&mut self, tui: &mut tui::Tui) {
+        match self.overlay.as_mut() {
+            Some(Overlay::Context(ctx)) => {
+                context_overlay_handler::handle_close(ctx, &mut self.chat_widget);
+                let _ = tui.leave_alt_screen();
+                self.overlay = None;
+            }
+            Some(Overlay::Transcript(_)) => {
+                self.close_transcript_overlay(tui);
+            }
+            Some(Overlay::Static(_)) => {
+                let _ = tui.leave_alt_screen();
+                self.overlay = None;
+            }
+            None => {}
+        }
+        tui.frame_requester().schedule_frame();
     }
 
     #[cfg(target_os = "windows")]

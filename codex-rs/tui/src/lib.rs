@@ -40,6 +40,7 @@ mod app_event_sender;
 mod ascii_animation;
 mod bottom_pane;
 mod chatwidget;
+mod context_overlay_handler;
 mod cli;
 mod clipboard_paste;
 mod color;

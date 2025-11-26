@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::context_overlay::ContextOverlay;
+use crate::context_overlay::ExitAction;
 use crate::history_cell::HistoryCell;
-use codex_protocol::models::ResponseItem;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -14,6 +14,8 @@ use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
+use codex_protocol::protocol::PromptContextItem;
+use codex_protocol::protocol::PromptContextSelection;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -51,11 +53,6 @@ impl Overlay {
     ) -> Self {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
-
-    pub(crate) fn new_context(entries: Vec<ResponseItem>) -> Self {
-        Self::Context(ContextOverlay::new(entries))
-    }
-
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
@@ -69,6 +66,30 @@ impl Overlay {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
             Overlay::Context(o) => o.is_done(),
+        }
+    }
+
+    pub(crate) fn new_context(entries: Vec<PromptContextItem>) -> Self {
+        Self::Context(ContextOverlay::new(entries))
+    }
+
+    pub(crate) fn update_context(&mut self, entries: Vec<PromptContextItem>) {
+        if let Overlay::Context(o) = self {
+            o.set_items(entries);
+        }
+    }
+
+    pub(crate) fn take_prompt_context_updates(&mut self) -> Vec<PromptContextSelection> {
+        match self {
+            Overlay::Context(o) => o.take_selection_updates(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub(crate) fn prompt_context_exit_action(&self) -> Option<ExitAction> {
+        match self {
+            Overlay::Context(o) => Some(o.exit_action()),
+            _ => None,
         }
     }
 }

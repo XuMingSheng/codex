@@ -8,6 +8,8 @@ use crate::wrapping::word_wrap_lines;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalShellAction;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::PromptContextItem;
+use codex_protocol::protocol::PromptContextSelection;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -36,6 +38,10 @@ const KEY_PAGE_UP: KeyBinding = key_hint::plain(KeyCode::PageUp);
 const KEY_PAGE_DOWN: KeyBinding = key_hint::plain(KeyCode::PageDown);
 const KEY_CLOSE_Q: KeyBinding = key_hint::plain(KeyCode::Char('q'));
 const KEY_CLOSE_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
+const KEY_TOGGLE_SPACE: KeyBinding = key_hint::plain(KeyCode::Char(' '));
+const KEY_TOGGLE_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
+const KEY_SAVE_EXIT: KeyBinding = key_hint::ctrl(KeyCode::Char('s'));
+const KEY_CANCEL_EXIT: KeyBinding = key_hint::plain(KeyCode::Char('x'));
 
 pub(crate) struct ContextOverlay {
     entries: Vec<ContextEntry>,
@@ -45,22 +51,13 @@ pub(crate) struct ContextOverlay {
     last_detail_area_height: u16,
     last_detail_total_height: usize,
     is_done: bool,
+    pending_updates: Vec<PromptContextSelection>,
+    exit_action: Option<ExitAction>,
 }
 
 impl ContextOverlay {
-    pub(crate) fn new(items: Vec<ResponseItem>) -> Self {
-        let entries = if items.is_empty() {
-            vec![ContextEntry::from_strings(
-                "conversation is empty",
-                vec!["Nothing has been sent to the model yet.".to_string()],
-            )]
-        } else {
-            items
-                .into_iter()
-                .enumerate()
-                .map(|(idx, item)| ContextEntry::from_response(idx, item))
-                .collect()
-        };
+    pub(crate) fn new(items: Vec<PromptContextItem>) -> Self {
+        let entries = build_entries(items);
         Self {
             entries,
             selected: 0,
@@ -69,7 +66,19 @@ impl ContextOverlay {
             last_detail_area_height: 0,
             last_detail_total_height: 0,
             is_done: false,
+            pending_updates: Vec::new(),
+            exit_action: None,
         }
+    }
+
+    pub(crate) fn set_items(&mut self, items: Vec<PromptContextItem>) {
+        self.entries = build_entries(items);
+        if self.selected >= self.entries.len() {
+            self.selected = self.entries.len().saturating_sub(1);
+        }
+        self.list_scroll = self.list_scroll.min(self.selected);
+        self.detail_scroll = 0;
+        self.pending_updates.clear();
     }
 
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
@@ -93,16 +102,25 @@ impl ContextOverlay {
         self.is_done
     }
 
+    pub(crate) fn exit_action(&self) -> ExitAction {
+        self.exit_action.unwrap_or(ExitAction::Cancel)
+    }
+
+    pub(crate) fn take_selection_updates(&mut self) -> Vec<PromptContextSelection> {
+        std::mem::take(&mut self.pending_updates)
+    }
+
     fn handle_key(&mut self, key_event: KeyEvent) -> bool {
-        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat
-        {
+        if key_event.kind != KeyEventKind::Press && key_event.kind != KeyEventKind::Repeat {
             return false;
         }
         match key_event.code {
-            KeyCode::Char('q') | KeyCode::Esc => {
-                self.is_done = true;
-                true
+            KeyCode::Char('q') | KeyCode::Esc => self.cancel_exit(),
+            KeyCode::Char('x') => self.cancel_exit(),
+            KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.save_and_exit()
             }
+            KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selection(),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.scroll_detail(-(self.page_scroll_amount() as isize)),
@@ -117,14 +135,7 @@ impl ContextOverlay {
                 self.detail_scroll = usize::MAX;
                 true
             }
-            _ => {
-                // Provide WASD-style aliases for selection when arrow keys unavailable.
-                match key_event.code {
-                    KeyCode::Char('w') => self.move_selection(-1),
-                    KeyCode::Char('s') => self.move_selection(1),
-                    _ => false,
-                }
-            }
+            _ => false,
         }
     }
 
@@ -209,7 +220,8 @@ impl ContextOverlay {
             .skip(self.list_scroll)
             .take(visible)
         {
-            let label = format!("{:>2} {}", idx + 1, entry.label);
+            let marker = if entry.selected { "[x]" } else { "[ ]" };
+            let label = format!("{:>2} {marker} {}", idx + 1, entry.label);
             if idx == self.selected {
                 lines.push(Line::from(label.cyan().bold()));
             } else {
@@ -266,17 +278,58 @@ impl ContextOverlay {
             return;
         }
         let mut spans: Vec<Span<'static>> = vec![];
-        spans.extend(render_hint_segment(&[KEY_UP, KEY_DOWN, KEY_J, KEY_K], "select"));
+        spans.extend(render_hint_segment(
+            &[KEY_UP, KEY_DOWN, KEY_J, KEY_K],
+            "select",
+        ));
         spans.extend(render_hint_segment(
             &[KEY_SCROLL_UP, KEY_SCROLL_DOWN, KEY_PAGE_UP, KEY_PAGE_DOWN],
             "scroll detail",
         ));
         spans.extend(render_hint_segment(
-            &[KEY_CLOSE_Q, KEY_CLOSE_ESC],
-            "close",
+            &[KEY_TOGGLE_SPACE, KEY_TOGGLE_ENTER],
+            "toggle",
         ));
+        spans.extend(render_hint_segment(
+            &[KEY_SAVE_EXIT],
+            "save & exit",
+        ));
+        spans.extend(render_hint_segment(&[KEY_CLOSE_Q, KEY_CLOSE_ESC, KEY_CANCEL_EXIT], "cancel"));
         Paragraph::new(Line::from(spans)).render(area, buf);
     }
+
+    fn toggle_selection(&mut self) -> bool {
+        if let Some(entry) = self.entries.get_mut(self.selected) {
+            if entry.id < 0 {
+                return false;
+            }
+            entry.selected = !entry.selected;
+            self.pending_updates.push(PromptContextSelection {
+                id: entry.id,
+                selected: entry.selected,
+            });
+            return true;
+        }
+        false
+    }
+
+    fn save_and_exit(&mut self) -> bool {
+        self.is_done = true;
+        self.exit_action = Some(ExitAction::Save);
+        true
+    }
+
+    fn cancel_exit(&mut self) -> bool {
+        self.is_done = true;
+        self.exit_action = Some(ExitAction::Cancel);
+        true
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExitAction {
+    Save,
+    Cancel,
 }
 
 fn render_hint_segment(keys: &[KeyBinding], desc: &str) -> Vec<Span<'static>> {
@@ -295,18 +348,25 @@ fn render_hint_segment(keys: &[KeyBinding], desc: &str) -> Vec<Span<'static>> {
 }
 
 struct ContextEntry {
+    id: i64,
+    selected: bool,
     label: String,
     lines: Vec<Line<'static>>,
 }
 
 impl ContextEntry {
-    fn from_response(idx: usize, item: ResponseItem) -> Self {
-        let (label, detail) = describe_item(idx, &item);
+    fn from_prompt_item(idx: usize, item: PromptContextItem) -> Self {
+        let (label, detail) = describe_item(idx, &item.item);
         let lines = detail
             .lines()
             .map(|line| Line::from(line.to_string()))
             .collect();
-        Self { label, lines }
+        Self {
+            id: item.id,
+            selected: item.selected,
+            label,
+            lines,
+        }
     }
 
     fn from_strings(label: &str, lines: Vec<String>) -> Self {
@@ -315,10 +375,26 @@ impl ContextEntry {
             .map(|line| Line::from(line))
             .collect::<Vec<_>>();
         Self {
+            id: -1,
+            selected: true,
             label: label.to_string(),
             lines,
         }
     }
+}
+
+fn build_entries(items: Vec<PromptContextItem>) -> Vec<ContextEntry> {
+    if items.is_empty() {
+        return vec![ContextEntry::from_strings(
+            "conversation is empty",
+            vec!["This conversation has no history items yet.".to_string()],
+        )];
+    }
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(idx, item)| ContextEntry::from_prompt_item(idx, item))
+        .collect()
 }
 
 fn describe_item(idx: usize, item: &ResponseItem) -> (String, String) {
@@ -328,10 +404,12 @@ fn describe_item(idx: usize, item: &ResponseItem) -> (String, String) {
             let snippet = truncate_text(&body, 40);
             (
                 format!("{role}: {snippet}"),
-                format!("Message #{idx}\nRole: {role}\n\n{body}"),
+                format!("Message #{}\nRole: {role}\n\n{body}", idx + 1),
             )
         }
-        ResponseItem::Reasoning { summary, content, .. } => {
+        ResponseItem::Reasoning {
+            summary, content, ..
+        } => {
             let mut parts: Vec<String> = summary
                 .iter()
                 .filter_map(|s| match s {
@@ -342,7 +420,8 @@ fn describe_item(idx: usize, item: &ResponseItem) -> (String, String) {
                 .collect();
             if let Some(content) = content {
                 for c in content {
-                    if let codex_protocol::models::ReasoningItemContent::ReasoningText { text } = c {
+                    if let codex_protocol::models::ReasoningItemContent::ReasoningText { text } = c
+                    {
                         parts.push(text.clone());
                     }
                 }
@@ -367,11 +446,7 @@ fn describe_item(idx: usize, item: &ResponseItem) -> (String, String) {
             let success = output.success.unwrap_or(true);
             (
                 format!("function output ({call_id})"),
-                format!(
-                    "Function output (success={}):\n{}",
-                    success,
-                    output.content
-                ),
+                format!("Function output (success={}):\n{}", success, output.content),
             )
         }
         ResponseItem::CustomToolCall { name, input, .. } => (

@@ -9,6 +9,7 @@ use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::protocol::PromptContextSelection;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 
@@ -23,6 +24,58 @@ fn assistant_msg(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
     }
+}
+
+#[test]
+fn prompt_selection_filters_items() {
+    let items = vec![user_msg("remove me"), assistant_msg("keep me")];
+    let mut history = create_history_with_items(items);
+    let context_items = history.prompt_context_items();
+    let first_id = context_items
+        .first()
+        .expect("expected at least one context item")
+        .id;
+    history.apply_selections(&[PromptContextSelection {
+        id: first_id,
+        selected: false,
+    }]);
+    let prompt_items = history.get_history_for_prompt();
+    assert_eq!(
+        prompt_items,
+        vec![assistant_msg("keep me")],
+        "unselected items should be omitted from the prompt"
+    );
+}
+
+#[test]
+fn replace_preserves_selection_and_ids() {
+    let mut history = create_history_with_items(vec![user_msg("keep"), assistant_msg("stay")]);
+    let initial_items = history.prompt_context_items();
+    let first_id = initial_items
+        .first()
+        .expect("expected at least one context item")
+        .id;
+    history.apply_selections(&[PromptContextSelection {
+        id: first_id,
+        selected: false,
+    }]);
+
+    let before_replace = history.prompt_context_items();
+    let rebuilt_source = history.contents();
+    history.replace(rebuilt_source);
+    let after_replace = history.prompt_context_items();
+
+    assert_eq!(before_replace.len(), after_replace.len());
+    assert_eq!(
+        before_replace.first().unwrap().id,
+        after_replace.first().unwrap().id,
+        "expected ids to persist across replace"
+    );
+    assert_eq!(
+        before_replace.first().unwrap().selected,
+        after_replace.first().unwrap().selected,
+        "expected selection to persist across replace"
+    );
 }
 
 fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {

@@ -178,9 +178,6 @@ pub enum Op {
     /// Request a single history entry identified by `log_id` + `offset`.
     GetHistoryEntryRequest { offset: usize, log_id: u64 },
 
-    /// Request the items that currently make up the prompt context.
-    PromptContextRequest,
-
     /// Request the list of MCP tools available across all configured servers.
     /// Reply is delivered via `EventMsg::McpListToolsResponse`.
     ListMcpTools,
@@ -210,6 +207,14 @@ pub enum Op {
     RunUserShellCommand {
         /// The raw command string after '!'
         command: String,
+    },
+
+    /// Request the items that currently make up the prompt context.
+    PromptContextRequest,
+
+    /// Update selection for prompt-context items so UIs can persist user choices.
+    PromptContextUpdate {
+        selections: Vec<PromptContextSelection>,
     },
 }
 
@@ -1509,11 +1514,6 @@ pub struct GetHistoryEntryResponseEvent {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
-pub struct PromptContextResponseEvent {
-    pub items: Vec<ResponseItem>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct McpListToolsResponseEvent {
     /// Fully qualified tool name -> tool definition.
     pub tools: std::collections::HashMap<String, McpTool>,
@@ -1681,6 +1681,24 @@ pub enum TurnAbortReason {
     Interrupted,
     Replaced,
     ReviewEnded,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct PromptContextResponseEvent {
+    pub items: Vec<PromptContextItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct PromptContextItem {
+    pub id: i64,
+    pub selected: bool,
+    pub item: ResponseItem,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct PromptContextSelection {
+    pub id: i64,
+    pub selected: bool,
 }
 
 #[cfg(test)]

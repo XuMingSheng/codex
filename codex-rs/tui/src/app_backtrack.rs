@@ -221,8 +221,7 @@ impl App {
         if let Some(overlay) = &mut self.overlay {
             overlay.handle_event(tui, event)?;
             if overlay.is_done() {
-                self.close_transcript_overlay(tui);
-                tui.frame_requester().schedule_frame();
+                self.handle_overlay_closed(tui);
             }
         }
         Ok(())

@@ -7,16 +7,26 @@ use crate::truncate::truncate_function_output_items_with_policy;
 use crate::truncate::truncate_text;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::PromptContextItem;
+use codex_protocol::protocol::PromptContextSelection;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use std::ops::Deref;
 
 /// Transcript of conversation history
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct ContextManager {
     /// The oldest items are at the beginning of the vector.
-    items: Vec<ResponseItem>,
+    items: Vec<ContextEntry>,
     token_info: Option<TokenUsageInfo>,
+    next_id: i64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContextEntry {
+    pub(crate) id: i64,
+    pub(crate) selected: bool,
+    pub(crate) item: ResponseItem,
 }
 
 impl ContextManager {
@@ -24,6 +34,7 @@ impl ContextManager {
         Self {
             items: Vec::new(),
             token_info: TokenUsageInfo::new_or_append(&None, &None, None),
+            next_id: 1,
         }
     }
 
@@ -57,8 +68,8 @@ impl ContextManager {
                 continue;
             }
 
-            let processed = self.process_item(item_ref, policy);
-            self.items.push(processed);
+            let entry = self.make_processed_entry(item_ref, policy);
+            self.items.push(entry);
         }
     }
 
@@ -70,9 +81,30 @@ impl ContextManager {
     // Returns the history prepared for sending to the model.
     // With extra response items filtered out and GhostCommits removed.
     pub(crate) fn get_history_for_prompt(&mut self) -> Vec<ResponseItem> {
-        let mut history = self.get_history();
-        Self::remove_ghost_snapshots(&mut history);
-        history
+        self.prompt_entries()
+            .into_iter()
+            .filter(|entry| entry.selected)
+            .map(|entry| entry.item)
+            .collect()
+    }
+
+    pub(crate) fn prompt_context_items(&mut self) -> Vec<PromptContextItem> {
+        self.prompt_entries()
+            .into_iter()
+            .map(|entry| PromptContextItem {
+                id: entry.id,
+                selected: entry.selected,
+                item: entry.item,
+            })
+            .collect()
+    }
+
+    pub(crate) fn apply_selections(&mut self, updates: &[PromptContextSelection]) {
+        for update in updates {
+            if let Some(entry) = self.items.iter_mut().find(|entry| entry.id == update.id) {
+                entry.selected = update.selected;
+            }
+        }
     }
 
     // Estimate token usage using byte-based heuristics from the truncation helpers.
@@ -83,7 +115,8 @@ impl ContextManager {
             i64::try_from(approx_token_count(model_family.base_instructions.as_str()))
                 .unwrap_or(i64::MAX);
 
-        let items_tokens = self.items.iter().fold(0i64, |acc, item| {
+        let items_tokens = self.items.iter().fold(0i64, |acc, entry| {
+            let item = entry.item.clone();
             acc + match item {
                 ResponseItem::Reasoning {
                     encrypted_content: Some(content),
@@ -93,7 +126,7 @@ impl ContextManager {
                     encrypted_content: content,
                 } => estimate_reasoning_length(content.len()) as i64,
                 item => {
-                    let serialized = serde_json::to_string(item).unwrap_or_default();
+                    let serialized = serde_json::to_string(&item).unwrap_or_default();
                     i64::try_from(approx_token_count(&serialized)).unwrap_or(i64::MAX)
                 }
             }
@@ -110,12 +143,24 @@ impl ContextManager {
             // If the removed item participates in a call/output pair, also remove
             // its corresponding counterpart to keep the invariants intact without
             // running a full normalization pass.
-            normalize::remove_corresponding_for(&mut self.items, &removed);
+            normalize::remove_corresponding_for(&mut self.items, &removed.item);
         }
     }
 
     pub(crate) fn replace(&mut self, items: Vec<ResponseItem>) {
-        self.items = items;
+        self.next_id = 1;
+        self.items = items
+            .into_iter()
+            .map(|item| {
+                let id = self.next_id;
+                self.next_id += 1;
+                ContextEntry {
+                    id,
+                    selected: true,
+                    item,
+                }
+            })
+            .collect();
     }
 
     pub(crate) fn update_token_info(
@@ -132,11 +177,9 @@ impl ContextManager {
 
     fn get_non_last_reasoning_items_tokens(&self) -> usize {
         // get reasoning items excluding all the ones after the last user message
-        let Some(last_user_index) = self
-            .items
-            .iter()
-            .rposition(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
-        else {
+        let Some(last_user_index) = self.items.iter().rposition(
+            |entry| matches!(entry.clone().item, ResponseItem::Message { role, .. } if role == "user"),
+        ) else {
             return 0usize;
         };
 
@@ -144,11 +187,11 @@ impl ContextManager {
             .items
             .iter()
             .take(last_user_index)
-            .filter_map(|item| {
+            .filter_map(|entry| {
                 if let ResponseItem::Reasoning {
                     encrypted_content: Some(content),
                     ..
-                } = item
+                } = entry.clone().item
                 {
                     Some(content.len())
                 } else {
@@ -175,7 +218,7 @@ impl ContextManager {
     /// 2. every output has a corresponding call entry
     fn normalize_history(&mut self) {
         // all function/tool calls must have a corresponding output
-        normalize::ensure_call_outputs_present(&mut self.items);
+        normalize::ensure_call_outputs_present(&mut self.items, &mut self.next_id);
 
         // all outputs must have a corresponding function/tool call
         normalize::remove_orphan_outputs(&mut self.items);
@@ -183,11 +226,11 @@ impl ContextManager {
 
     /// Returns a clone of the contents in the transcript.
     fn contents(&self) -> Vec<ResponseItem> {
-        self.items.clone()
+        self.items.iter().map(|entry| entry.item.clone()).collect()
     }
 
-    fn remove_ghost_snapshots(items: &mut Vec<ResponseItem>) {
-        items.retain(|item| !matches!(item, ResponseItem::GhostSnapshot { .. }));
+    fn remove_ghost_snapshots(items: &mut Vec<ContextEntry>) {
+        items.retain(|entry| !matches!(entry.item, ResponseItem::GhostSnapshot { .. }));
     }
 
     fn process_item(&self, item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
@@ -228,6 +271,34 @@ impl ContextManager {
             | ResponseItem::GhostSnapshot { .. }
             | ResponseItem::Other => item.clone(),
         }
+    }
+
+    fn make_processed_entry(
+        &mut self,
+        item: &ResponseItem,
+        policy: TruncationPolicy,
+    ) -> ContextEntry {
+        let processed = self.process_item(item, policy);
+        let id = self.next_id;
+        self.next_id += 1;
+        ContextEntry {
+            id,
+            selected: true,
+            item: processed,
+        }
+    }
+
+    fn prompt_entries(&mut self) -> Vec<ContextEntry> {
+        self.normalize_history();
+        let mut entries = self.items.clone();
+        Self::remove_ghost_snapshots(&mut entries);
+        entries
+    }
+}
+
+impl Default for ContextManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
