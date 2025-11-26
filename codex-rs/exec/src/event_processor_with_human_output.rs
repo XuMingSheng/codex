@@ -253,7 +253,6 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::TokenCount(ev) => {
                 self.last_total_token_usage = ev.info;
             }
-
             EventMsg::AgentReasoningSectionBreak(_) => {
                 if !self.show_agent_reasoning {
                     return CodexStatus::Running;
@@ -583,7 +582,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::ReasoningContentDelta(_)
             | EventMsg::ReasoningRawContentDelta(_)
             | EventMsg::UndoCompleted(_)
-            | EventMsg::UndoStarted(_) => {}
+            | EventMsg::UndoStarted(_)
+            | EventMsg::PromptContextResponse(_) => {}
         }
         CodexStatus::Running
     }

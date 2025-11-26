@@ -43,6 +43,7 @@ mod chatwidget;
 mod cli;
 mod clipboard_paste;
 mod color;
+mod context_overlay;
 pub mod custom_terminal;
 mod diff_render;
 mod exec_cell;

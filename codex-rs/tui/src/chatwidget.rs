@@ -1517,6 +1517,9 @@ impl ChatWidget {
             SlashCommand::Status => {
                 self.add_status_output();
             }
+            SlashCommand::Context => {
+                self.submit_op(Op::PromptContextRequest);
+            }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
             }
@@ -1797,6 +1800,10 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
+            EventMsg::PromptContextResponse(ev) => {
+                self.app_event_tx
+                    .send(AppEvent::PromptContext { items: ev.items });
+            }
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)
             | EventMsg::ItemCompleted(_)

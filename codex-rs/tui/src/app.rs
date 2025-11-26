@@ -528,6 +528,14 @@ impl App {
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }
+            AppEvent::PromptContext { items } => {
+                if self.overlay.is_some() {
+                    self.close_transcript_overlay(tui);
+                }
+                let _ = tui.enter_alt_screen();
+                self.overlay = Some(Overlay::new_context(items));
+                tui.frame_requester().schedule_frame();
+            }
             AppEvent::ExitRequest => {
                 return Ok(false);
             }

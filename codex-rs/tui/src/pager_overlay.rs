@@ -2,7 +2,9 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::context_overlay::ContextOverlay;
 use crate::history_cell::HistoryCell;
+use codex_protocol::models::ResponseItem;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -31,6 +33,7 @@ use ratatui::widgets::Wrap;
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    Context(ContextOverlay),
 }
 
 impl Overlay {
@@ -49,10 +52,15 @@ impl Overlay {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
 
+    pub(crate) fn new_context(entries: Vec<ResponseItem>) -> Self {
+        Self::Context(ContextOverlay::new(entries))
+    }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::Context(o) => o.handle_event(tui, event),
         }
     }
 
@@ -60,6 +68,7 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::Context(o) => o.is_done(),
         }
     }
 }

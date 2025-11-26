@@ -6,6 +6,7 @@ use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_file_search::FileMatch;
+use codex_protocol::models::ResponseItem;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
@@ -143,6 +144,9 @@ pub(crate) enum AppEvent {
 
     /// Forwarded conversation history snapshot from the current conversation.
     ConversationHistory(ConversationPathResponseEvent),
+
+    /// Forwarded prompt context snapshot for the next turn.
+    PromptContext { items: Vec<ResponseItem> },
 
     /// Open the branch picker option from the review popup.
     OpenReviewBranchPicker(PathBuf),

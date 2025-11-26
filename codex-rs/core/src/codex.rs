@@ -1429,6 +1429,9 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::get_history_entry_request(&sess, &config, sub.id.clone(), offset, log_id)
                     .await;
             }
+            Op::PromptContextRequest => {
+                handlers::prompt_context(&sess, sub.id.clone()).await;
+            }
             Op::ListMcpTools => {
                 handlers::list_mcp_tools(&sess, &config, sub.id.clone()).await;
             }
@@ -1490,6 +1493,7 @@ mod handlers {
     use codex_protocol::protocol::Event;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ListCustomPromptsResponseEvent;
+    use codex_protocol::protocol::PromptContextResponseEvent;
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
@@ -1671,6 +1675,16 @@ mod handlers {
 
             sess_clone.send_event_raw(event).await;
         });
+    }
+
+    pub async fn prompt_context(sess: &Arc<Session>, sub_id: String) {
+        let mut history = sess.clone_history().await;
+        let items = history.get_history_for_prompt();
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::PromptContextResponse(PromptContextResponseEvent { items }),
+        };
+        sess.send_event_raw(event).await;
     }
 
     pub async fn list_mcp_tools(sess: &Session, config: &Arc<Config>, sub_id: String) {
