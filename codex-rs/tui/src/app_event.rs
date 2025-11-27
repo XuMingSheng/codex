@@ -168,8 +168,8 @@ pub(crate) enum AppEvent {
         category: FeedbackCategory,
     },
 
-    /// Forwarded prompt context snapshot for the next turn.
-    PromptContext {
+    /// Open the prompt context overlay with the provided snapshot.
+    OpenPromptContext {
         items: Vec<PromptContextItem>,
     },
 }

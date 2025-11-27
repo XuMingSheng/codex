@@ -210,10 +210,10 @@ pub enum Op {
     },
 
     /// Request the items that currently make up the prompt context.
-    PromptContextRequest,
+    GetPromptContext,
 
     /// Update selection for prompt-context items so UIs can persist user choices.
-    PromptContextUpdate {
+    UpdatePromptContextSelection {
         selections: Vec<PromptContextSelection>,
     },
 }
@@ -559,9 +559,6 @@ pub enum EventMsg {
     /// Response to GetHistoryEntryRequest.
     GetHistoryEntryResponse(GetHistoryEntryResponseEvent),
 
-    /// Snapshot of the pending prompt context.
-    PromptContextResponse(PromptContextResponseEvent),
-
     /// List of MCP tools available to the agent.
     McpListToolsResponse(McpListToolsResponseEvent),
 
@@ -580,6 +577,12 @@ pub enum EventMsg {
 
     /// Exited review mode with an optional final result to apply.
     ExitedReviewMode(ExitedReviewModeEvent),
+
+    /// Response to `Op::GetPromptContext`.
+    GetPromptContextResponse(PromptContextResponseEvent),
+
+    /// Response to `Op::UpdatePromptContextSelection`.
+    UpdatePromptContextResponse(PromptContextResponseEvent),
 
     RawResponseItem(RawResponseItemEvent),
 

@@ -40,7 +40,7 @@ const KEY_CLOSE_Q: KeyBinding = key_hint::plain(KeyCode::Char('q'));
 const KEY_CLOSE_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_TOGGLE_SPACE: KeyBinding = key_hint::plain(KeyCode::Char(' '));
 const KEY_TOGGLE_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
-const KEY_SAVE_EXIT: KeyBinding = key_hint::ctrl(KeyCode::Char('s'));
+const KEY_SAVE_EXIT: KeyBinding = key_hint::plain(KeyCode::Char('s'));
 const KEY_CANCEL_EXIT: KeyBinding = key_hint::plain(KeyCode::Char('x'));
 
 pub(crate) struct ContextOverlay {
@@ -117,9 +117,7 @@ impl ContextOverlay {
         match key_event.code {
             KeyCode::Char('q') | KeyCode::Esc => self.cancel_exit(),
             KeyCode::Char('x') => self.cancel_exit(),
-            KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.save_and_exit()
-            }
+            KeyCode::Char('s') => self.save_and_exit(),
             KeyCode::Char(' ') | KeyCode::Enter => self.toggle_selection(),
             KeyCode::Up | KeyCode::Char('k') => self.move_selection(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
@@ -290,11 +288,11 @@ impl ContextOverlay {
             &[KEY_TOGGLE_SPACE, KEY_TOGGLE_ENTER],
             "toggle",
         ));
+        spans.extend(render_hint_segment(&[KEY_SAVE_EXIT], "save & exit"));
         spans.extend(render_hint_segment(
-            &[KEY_SAVE_EXIT],
-            "save & exit",
+            &[KEY_CLOSE_Q, KEY_CLOSE_ESC, KEY_CANCEL_EXIT],
+            "cancel",
         ));
-        spans.extend(render_hint_segment(&[KEY_CLOSE_Q, KEY_CLOSE_ESC, KEY_CANCEL_EXIT], "cancel"));
         Paragraph::new(Line::from(spans)).render(area, buf);
     }
 

@@ -1518,7 +1518,7 @@ impl ChatWidget {
                 self.add_status_output();
             }
             SlashCommand::Context => {
-                self.submit_op(Op::PromptContextRequest);
+                self.submit_op(Op::GetPromptContext);
             }
             SlashCommand::Mcp => {
                 self.add_mcp_output();
@@ -1800,9 +1800,12 @@ impl ChatWidget {
             }
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
-            EventMsg::PromptContextResponse(ev) => {
+            EventMsg::GetPromptContextResponse(ev) => {
                 self.app_event_tx
-                    .send(AppEvent::PromptContext { items: ev.items });
+                    .send(AppEvent::OpenPromptContext { items: ev.items });
+            }
+            EventMsg::UpdatePromptContextResponse(_) => {
+                // No UI action required; selections persisted server-side.
             }
             EventMsg::RawResponseItem(_)
             | EventMsg::ItemStarted(_)

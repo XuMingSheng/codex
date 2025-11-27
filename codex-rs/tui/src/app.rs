@@ -3,7 +3,6 @@ use crate::app_event::AppEvent;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::ApprovalRequest;
 use crate::chatwidget::ChatWidget;
-use crate::context_overlay::ExitAction;
 use crate::context_overlay_handler;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
@@ -530,13 +529,6 @@ impl App {
             AppEvent::ConversationHistory(ev) => {
                 self.on_conversation_history_for_backtrack(tui, ev).await?;
             }
-            AppEvent::PromptContext { items } => {
-                context_overlay_handler::open_or_update_context_overlay(
-                    &mut self.overlay,
-                    tui,
-                    items,
-                );
-            }
             AppEvent::ExitRequest => {
                 return Ok(false);
             }
@@ -878,6 +870,9 @@ impl App {
                     ));
                 }
             },
+            AppEvent::OpenPromptContext { items } => {
+                context_overlay_handler::open_context_overlay(&mut self.overlay, tui, items);
+            }
         }
         Ok(true)
     }

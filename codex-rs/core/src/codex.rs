@@ -1429,12 +1429,6 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::get_history_entry_request(&sess, &config, sub.id.clone(), offset, log_id)
                     .await;
             }
-            Op::PromptContextRequest => {
-                handlers::prompt_context(&sess, sub.id.clone()).await;
-            }
-            Op::PromptContextUpdate { selections } => {
-                handlers::prompt_context_update(&sess, sub.id.clone(), selections).await;
-            }
             Op::ListMcpTools => {
                 handlers::list_mcp_tools(&sess, &config, sub.id.clone()).await;
             }
@@ -1470,6 +1464,12 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             }
             Op::Review { review_request } => {
                 handlers::review(&sess, &config, sub.id.clone(), review_request).await;
+            }
+            Op::GetPromptContext => {
+                handlers::get_prompt_context(&sess, sub.id.clone()).await;
+            }
+            Op::UpdatePromptContextSelection { selections } => {
+                handlers::update_prompt_context(&sess, sub.id.clone(), selections).await;
             }
             _ => {} // Ignore unknown ops; enum is non_exhaustive to allow extensions.
         }
@@ -1681,33 +1681,6 @@ mod handlers {
         });
     }
 
-    pub async fn prompt_context(sess: &Arc<Session>, sub_id: String) {
-        let mut history = sess.clone_history().await;
-        let items = history.prompt_context_items();
-        let event = Event {
-            id: sub_id,
-            msg: EventMsg::PromptContextResponse(PromptContextResponseEvent { items }),
-        };
-        sess.send_event_raw(event).await;
-    }
-
-    pub async fn prompt_context_update(
-        sess: &Arc<Session>,
-        sub_id: String,
-        selections: Vec<PromptContextSelection>,
-    ) {
-        let mut state = sess.state.lock().await;
-        state.history.apply_selections(&selections);
-        let mut history = state.history.clone();
-        drop(state);
-        let items = history.prompt_context_items();
-        let event = Event {
-            id: sub_id,
-            msg: EventMsg::PromptContextResponse(PromptContextResponseEvent { items }),
-        };
-        sess.send_event_raw(event).await;
-    }
-
     pub async fn list_mcp_tools(sess: &Session, config: &Arc<Config>, sub_id: String) {
         let mcp_connection_manager = sess.services.mcp_connection_manager.read().await;
         let (tools, auth_status_entries, resources, resource_templates) = tokio::join!(
@@ -1831,6 +1804,33 @@ mod handlers {
             review_request,
         )
         .await;
+    }
+
+    pub async fn get_prompt_context(sess: &Arc<Session>, sub_id: String) {
+        let mut history = sess.clone_history().await;
+        let items = history.prompt_context_items();
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::GetPromptContextResponse(PromptContextResponseEvent { items }),
+        };
+        sess.send_event_raw(event).await;
+    }
+
+    pub async fn update_prompt_context(
+        sess: &Arc<Session>,
+        sub_id: String,
+        selections: Vec<PromptContextSelection>,
+    ) {
+        let mut state = sess.state.lock().await;
+        state.history.apply_selections(&selections);
+        let mut history = state.history.clone();
+        drop(state);
+        let items = history.prompt_context_items();
+        let event = Event {
+            id: sub_id,
+            msg: EventMsg::UpdatePromptContextResponse(PromptContextResponseEvent { items }),
+        };
+        sess.send_event_raw(event).await;
     }
 }
 
