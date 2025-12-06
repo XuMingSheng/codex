@@ -1,4 +1,4 @@
-# Codex CLI Context Tree Fork
+# Tree-Codex
 
 ## Purpose
 1. Provide transparent, user controlled context for LLM sessions so people can see what the agent remembers and curate it before each turn.
@@ -20,8 +20,7 @@ Use this overlay to review the prompt context tree rooted at your session before
 
 1. **Clone the repository and install the Rust toolchain.**  
    ```bash
-   git clone https://github.com/XuMingSheng/codex.git
-   cd codex/codex-rs
+   git clone https://github.com/XuMingSheng/direct-codex.git
    rustup install stable
    rustup component add rustfmt clippy
    ```
