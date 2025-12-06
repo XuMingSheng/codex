@@ -8,6 +8,7 @@ use crate::tree::ContextTree;
 use crate::tree::ContextTreeNode;
 
 const MAX_TITLE_LENGTH: usize = 100;
+const MAX_SUB_SUMMARY_LENGTH: usize = 500;
 const SUMMARY_THRESHOLD: usize = 100;
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,17 @@ impl<M: PromptModel> ContextTreeSummarizer<M> {
             .collect::<Vec<String>>()
             .join("\n\n===\n\n");
 
+        let clipped_combined = ordered_summaries
+            .iter()
+            .map(|(_, title, summary)| {
+                format_summary(
+                    title,
+                    clip_text(summary.as_str(), MAX_SUB_SUMMARY_LENGTH).as_str(),
+                )
+            })
+            .collect::<Vec<String>>()
+            .join("\n\n===\n\n");
+
         if combined.is_empty() {
             node.summary = String::new();
         } else {
@@ -80,7 +92,7 @@ impl<M: PromptModel> ContextTreeSummarizer<M> {
             if word_count > SUMMARY_THRESHOLD {
                 node.summary = self.summarize_with_model(&combined).await;
             } else {
-                node.summary = combined;
+                node.summary = clipped_combined
             }
         }
 
