@@ -1,4 +1,4 @@
-# Tree-Codex
+# Direct-Codex
 
 ## Purpose
 1. Provide transparent, user controlled context for LLM sessions so people can see what the agent remembers and curate it before each turn.
