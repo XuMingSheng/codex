@@ -1,84 +1,148 @@
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
-use crate::text_formatting::truncate_text;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::LocalShellAction;
-use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::PromptContextItem;
-use codex_protocol::protocol::PromptContextSelection;
+use codex_protocol::protocol::PromptContextActions;
+use codex_protocol::protocol::PromptContextNode;
+use codex_protocol::protocol::PromptContextTree;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
-use crossterm::event::KeyModifiers;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Direction;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
+use ratatui::prelude::Widget;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
+use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::text::Span;
 use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
-use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
 use std::io::Result;
+use textwrap::Options;
 
 const KEY_UP: KeyBinding = key_hint::plain(KeyCode::Up);
 const KEY_DOWN: KeyBinding = key_hint::plain(KeyCode::Down);
 const KEY_J: KeyBinding = key_hint::plain(KeyCode::Char('j'));
 const KEY_K: KeyBinding = key_hint::plain(KeyCode::Char('k'));
-const KEY_SCROLL_UP: KeyBinding = key_hint::plain(KeyCode::Char('['));
-const KEY_SCROLL_DOWN: KeyBinding = key_hint::plain(KeyCode::Char(']'));
 const KEY_PAGE_UP: KeyBinding = key_hint::plain(KeyCode::PageUp);
 const KEY_PAGE_DOWN: KeyBinding = key_hint::plain(KeyCode::PageDown);
+const KEY_LEFT_ARROW: KeyBinding = key_hint::plain(KeyCode::Left);
+const KEY_RIGHT_ARROW: KeyBinding = key_hint::plain(KeyCode::Right);
+const KEY_H_LOWER: KeyBinding = key_hint::plain(KeyCode::Char('h'));
+const KEY_L_LOWER: KeyBinding = key_hint::plain(KeyCode::Char('l'));
+const KEY_H_UPPER: KeyBinding = key_hint::plain(KeyCode::Char('H'));
+const KEY_L_UPPER: KeyBinding = key_hint::plain(KeyCode::Char('L'));
+const KEY_SPACE: KeyBinding = key_hint::plain(KeyCode::Char(' '));
+const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
+const KEY_SAVE: KeyBinding = key_hint::plain(KeyCode::Char('s'));
+const KEY_CANCEL: KeyBinding = key_hint::plain(KeyCode::Char('x'));
 const KEY_CLOSE_Q: KeyBinding = key_hint::plain(KeyCode::Char('q'));
 const KEY_CLOSE_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
-const KEY_TOGGLE_SPACE: KeyBinding = key_hint::plain(KeyCode::Char(' '));
-const KEY_TOGGLE_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
-const KEY_SAVE_EXIT: KeyBinding = key_hint::plain(KeyCode::Char('s'));
-const KEY_CANCEL_EXIT: KeyBinding = key_hint::plain(KeyCode::Char('x'));
+
+#[derive(Clone)]
+struct OverlayNode {
+    id: String,
+    labels: Vec<String>,
+    title: String,
+    summary: String,
+    selected: bool,
+    collapsed: bool,
+    children: Vec<OverlayNode>,
+    min_entry_id: Option<i64>,
+}
+
+impl OverlayNode {
+    fn from_prompt(node: &PromptContextNode) -> Self {
+        let mut children: Vec<OverlayNode> =
+            node.children.iter().map(OverlayNode::from_prompt).collect();
+        children.sort_by_key(|child| child.min_entry_id.unwrap_or(i64::MAX));
+        let min_entry_id = if node.id.starts_with("entry-") {
+            node.id
+                .strip_prefix("entry-")
+                .and_then(|id| id.parse::<i64>().ok())
+        } else {
+            children.iter().filter_map(|child| child.min_entry_id).min()
+        };
+
+        Self {
+            id: node.id.clone(),
+            labels: node.labels.clone(),
+            title: node.title.clone(),
+            summary: node.summary.clone(),
+            selected: node.selected,
+            collapsed: node.collapsed,
+            children,
+            min_entry_id,
+        }
+    }
+}
 
 pub(crate) struct ContextOverlay {
-    entries: Vec<ContextEntry>,
+    root: OverlayNode,
+    visible_paths: Vec<Vec<usize>>,
     selected: usize,
     list_scroll: usize,
     detail_scroll: usize,
-    last_detail_area_height: u16,
     last_detail_total_height: usize,
+    last_detail_area_height: u16,
     is_done: bool,
-    pending_updates: Vec<PromptContextSelection>,
     exit_action: Option<ExitAction>,
+    pending_selected: Vec<String>,
+    pending_collapsed: Vec<String>,
 }
 
 impl ContextOverlay {
-    pub(crate) fn new(items: Vec<PromptContextItem>) -> Self {
-        let entries = build_entries(items);
-        Self {
-            entries,
+    pub(crate) fn new(tree: Option<PromptContextTree>) -> Self {
+        let root = tree
+            .as_ref()
+            .map(|ctx| OverlayNode::from_prompt(&ctx.root))
+            .unwrap_or_else(Self::placeholder_root);
+        let mut overlay = Self {
+            root,
+            visible_paths: Vec::new(),
             selected: 0,
             list_scroll: 0,
             detail_scroll: 0,
-            last_detail_area_height: 0,
             last_detail_total_height: 0,
+            last_detail_area_height: 0,
             is_done: false,
-            pending_updates: Vec::new(),
             exit_action: None,
-        }
+            pending_selected: Vec::new(),
+            pending_collapsed: Vec::new(),
+        };
+        overlay.rebuild_visible_paths();
+        overlay
     }
 
-    pub(crate) fn set_items(&mut self, items: Vec<PromptContextItem>) {
-        self.entries = build_entries(items);
-        if self.selected >= self.entries.len() {
-            self.selected = self.entries.len().saturating_sub(1);
+    fn placeholder_root() -> OverlayNode {
+        let child = OverlayNode {
+            id: "placeholder-child".to_string(),
+            labels: vec!["conversation".to_string()],
+            title: "Context tree unavailable".to_string(),
+            summary: "No prompt context tree is available right now.".to_string(),
+            selected: true,
+            collapsed: false,
+            children: Vec::new(),
+            min_entry_id: None,
+        };
+        OverlayNode {
+            id: "placeholder-root".to_string(),
+            labels: vec!["conversation".to_string()],
+            title: "Conversation".to_string(),
+            summary: String::new(),
+            selected: true,
+            collapsed: false,
+            children: vec![child],
+            min_entry_id: None,
         }
-        self.list_scroll = self.list_scroll.min(self.selected);
-        self.detail_scroll = 0;
-        self.pending_updates.clear();
     }
 
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
@@ -106,8 +170,16 @@ impl ContextOverlay {
         self.exit_action.unwrap_or(ExitAction::Cancel)
     }
 
-    pub(crate) fn take_selection_updates(&mut self) -> Vec<PromptContextSelection> {
-        std::mem::take(&mut self.pending_updates)
+    pub(crate) fn take_selection_updates(&mut self) -> PromptContextActions {
+        PromptContextActions {
+            toggle_selected: std::mem::take(&mut self.pending_selected),
+            toggle_collapsed: std::mem::take(&mut self.pending_collapsed),
+        }
+    }
+
+    pub(crate) fn discard_selection_updates(&mut self) {
+        self.pending_selected.clear();
+        self.pending_collapsed.clear();
     }
 
     fn handle_key(&mut self, key_event: KeyEvent) -> bool {
@@ -123,16 +195,10 @@ impl ContextOverlay {
             KeyCode::Down | KeyCode::Char('j') => self.move_selection(1),
             KeyCode::PageUp => self.scroll_detail(-(self.page_scroll_amount() as isize)),
             KeyCode::PageDown => self.scroll_detail(self.page_scroll_amount() as isize),
-            KeyCode::Char('[') => self.scroll_detail(-1),
-            KeyCode::Char(']') => self.scroll_detail(1),
-            KeyCode::Home if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.detail_scroll = 0;
-                true
-            }
-            KeyCode::End if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.detail_scroll = usize::MAX;
-                true
-            }
+            KeyCode::Left | KeyCode::Char('h') => self.collapse_current(false),
+            KeyCode::Right | KeyCode::Char('l') => self.expand_current(false),
+            KeyCode::Char('H') => self.collapse_current(true),
+            KeyCode::Char('L') => self.expand_current(true),
             _ => false,
         }
     }
@@ -142,10 +208,10 @@ impl ContextOverlay {
     }
 
     fn move_selection(&mut self, delta: isize) -> bool {
-        if self.entries.is_empty() {
+        if self.visible_paths.is_empty() {
             return false;
         }
-        let len = self.entries.len() as isize;
+        let len = self.visible_paths.len() as isize;
         let mut next = self.selected as isize + delta;
         if next < 0 {
             next = 0;
@@ -161,7 +227,7 @@ impl ContextOverlay {
     }
 
     fn scroll_detail(&mut self, delta: isize) -> bool {
-        if delta == 0 {
+        if delta == 0 || self.last_detail_total_height == 0 {
             return false;
         }
         let current = self.detail_scroll as isize;
@@ -201,39 +267,86 @@ impl ContextOverlay {
             .constraints([Constraint::Length(left_width), Constraint::Min(min_detail)].as_ref())
             .split(area);
         self.render_list(chunks[0], buf);
+        self.render_divider(area, chunks[1], buf);
         self.render_detail(chunks[1], buf);
+    }
+
+    fn render_divider(&self, area: Rect, right: Rect, buf: &mut Buffer) {
+        if area.width == 0 || area.height == 0 || right.width == 0 {
+            return;
+        }
+        let divider_x = right.x.saturating_sub(1);
+        if divider_x < area.x || divider_x >= buf.area().width {
+            return;
+        }
+        let style = Style::default().fg(Color::DarkGray);
+        for y in area.y..area.y + area.height {
+            if y >= buf.area().height {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut((divider_x, y)) {
+                cell.set_char('│').set_style(style);
+            }
+        }
     }
 
     fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
         if area.width == 0 || area.height == 0 {
             return;
         }
+        self.ensure_selection_visible(area.height as usize);
         let visible = area.height as usize;
-        self.ensure_selection_visible(visible);
-        let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible);
-        for (idx, entry) in self
-            .entries
+        let mut lines = Vec::with_capacity(visible);
+        for (idx, path) in self
+            .visible_paths
             .iter()
             .enumerate()
             .skip(self.list_scroll)
             .take(visible)
         {
-            let marker = if entry.selected { "[x]" } else { "[ ]" };
-            let label = format!("{:>2} {marker} {}", idx + 1, entry.label);
-            if idx == self.selected {
-                lines.push(Line::from(label.cyan().bold()));
+            let Some(node) = self.node(path) else {
+                continue;
+            };
+            let indent = "  ".repeat(path.len().saturating_sub(1));
+            let marker = selection_marker(selection_state(node));
+            let fold = if node.children.is_empty() {
+                "  "
+            } else if node.collapsed {
+                "> "
             } else {
-                lines.push(Line::from(label));
+                "v "
+            };
+            let prefix = format!("{indent}{fold}{marker} ");
+            let subsequent_indent = " ".repeat(prefix.len());
+            let opts = Options::new(area.width.max(1) as usize)
+                .initial_indent(&prefix)
+                .subsequent_indent(&subsequent_indent);
+            let wrapped = textwrap::wrap(&node.title, &opts)
+                .into_iter()
+                .map(std::borrow::Cow::into_owned)
+                .collect::<Vec<_>>();
+            let lines_for_node = if wrapped.is_empty() {
+                vec![prefix.clone()]
+            } else {
+                wrapped
+            };
+            for line in lines_for_node {
+                let text = if idx == self.selected {
+                    Line::from(line.cyan().bold())
+                } else {
+                    Line::from(line)
+                };
+                lines.push(text);
             }
         }
         if lines.is_empty() {
-            lines.push(Line::from("No entries".dim()));
+            lines.push(Line::from("No nodes available".dim()));
         }
         Paragraph::new(lines).render(area, buf);
     }
 
     fn ensure_selection_visible(&mut self, visible: usize) {
-        if visible == 0 {
+        if visible == 0 || self.visible_paths.is_empty() {
             self.list_scroll = 0;
             return;
         }
@@ -250,11 +363,16 @@ impl ContextOverlay {
             self.last_detail_total_height = 0;
             return;
         }
-        let entry = self
-            .entries
-            .get(self.selected)
-            .unwrap_or_else(|| self.entries.first().expect("at least one entry"));
-        let wrapped = word_wrap_lines(entry.lines.clone(), RtOptions::new(area.width as usize));
+        let lines = if let Some(path) = self.visible_paths.get(self.selected) {
+            if let Some(node) = self.node(path) {
+                detail_lines_for_node(node)
+            } else {
+                vec![Line::from("No details available.".dim())]
+            }
+        } else {
+            vec![Line::from("No details available.".dim())]
+        };
+        let wrapped = word_wrap_lines(lines, RtOptions::new(area.width as usize));
         self.last_detail_total_height = wrapped.len();
         self.last_detail_area_height = area.height;
         let max_scroll = self
@@ -278,37 +396,133 @@ impl ContextOverlay {
         let mut spans: Vec<Span<'static>> = vec![];
         spans.extend(render_hint_segment(
             &[KEY_UP, KEY_DOWN, KEY_J, KEY_K],
-            "select",
+            "navigate",
         ));
         spans.extend(render_hint_segment(
-            &[KEY_SCROLL_UP, KEY_SCROLL_DOWN, KEY_PAGE_UP, KEY_PAGE_DOWN],
+            &[KEY_PAGE_UP, KEY_PAGE_DOWN],
             "scroll detail",
         ));
+        spans.extend(render_hint_segment(&[KEY_SPACE, KEY_ENTER], "toggle"));
         spans.extend(render_hint_segment(
-            &[KEY_TOGGLE_SPACE, KEY_TOGGLE_ENTER],
-            "toggle",
+            &[KEY_LEFT_ARROW, KEY_H_LOWER],
+            "collapse",
         ));
-        spans.extend(render_hint_segment(&[KEY_SAVE_EXIT], "save & exit"));
         spans.extend(render_hint_segment(
-            &[KEY_CLOSE_Q, KEY_CLOSE_ESC, KEY_CANCEL_EXIT],
+            &[KEY_RIGHT_ARROW, KEY_L_LOWER],
+            "expand",
+        ));
+        spans.extend(render_hint_segment(&[KEY_H_UPPER], "collapse all"));
+        spans.extend(render_hint_segment(&[KEY_L_UPPER], "expand all"));
+        spans.extend(render_hint_segment(&[KEY_SAVE], "save & exit"));
+        spans.extend(render_hint_segment(
+            &[KEY_CLOSE_Q, KEY_CLOSE_ESC, KEY_CANCEL],
             "cancel",
         ));
         Paragraph::new(Line::from(spans)).render(area, buf);
     }
 
     fn toggle_selection(&mut self) -> bool {
-        if let Some(entry) = self.entries.get_mut(self.selected) {
-            if entry.id < 0 {
+        let Some(path) = self.visible_paths.get(self.selected).cloned() else {
+            return false;
+        };
+        let mut changed_nodes = Vec::new();
+        {
+            let Some(node) = self.node_mut(&path) else {
+                return false;
+            };
+            let new_state = !node.selected;
+            node.set_descendants_selected(new_state, &mut changed_nodes);
+        }
+        if changed_nodes.is_empty() {
+            return false;
+        }
+        self.pending_selected.extend(changed_nodes);
+        true
+    }
+
+    fn collapse_current(&mut self, recursive: bool) -> bool {
+        self.set_collapse_state(true, recursive)
+    }
+
+    fn expand_current(&mut self, recursive: bool) -> bool {
+        self.set_collapse_state(false, recursive)
+    }
+
+    fn set_collapse_state(&mut self, collapse: bool, recursive: bool) -> bool {
+        let Some(path) = self.visible_paths.get(self.selected).cloned() else {
+            return false;
+        };
+        let mut changed_nodes = Vec::new();
+        {
+            let Some(node) = self.node_mut(&path) else {
+                return false;
+            };
+            if node.children.is_empty() {
                 return false;
             }
-            entry.selected = !entry.selected;
-            self.pending_updates.push(PromptContextSelection {
-                id: entry.id,
-                selected: entry.selected,
-            });
-            return true;
+            if node.collapsed != collapse {
+                node.collapsed = collapse;
+                changed_nodes.push(node.id.clone());
+            }
+            if recursive {
+                node.set_descendants_collapsed(collapse, &mut changed_nodes);
+            }
         }
-        false
+        if changed_nodes.is_empty() {
+            return false;
+        }
+        self.pending_collapsed.extend(changed_nodes);
+        self.detail_scroll = 0;
+        self.rebuild_visible_paths();
+        true
+    }
+
+    fn rebuild_visible_paths(&mut self) {
+        self.visible_paths.clear();
+        let mut current = Vec::new();
+        Self::collect_paths(&self.root, &mut current, &mut self.visible_paths);
+        if self.visible_paths.is_empty() {
+            self.selected = 0;
+            self.list_scroll = 0;
+            return;
+        }
+        if self.selected >= self.visible_paths.len() {
+            self.selected = self.visible_paths.len().saturating_sub(1);
+        }
+        self.list_scroll = self
+            .list_scroll
+            .min(self.visible_paths.len().saturating_sub(1));
+    }
+
+    fn collect_paths(
+        node: &OverlayNode,
+        prefix: &mut Vec<usize>,
+        visible_paths: &mut Vec<Vec<usize>>,
+    ) {
+        for (idx, child) in node.children.iter().enumerate() {
+            prefix.push(idx);
+            visible_paths.push(prefix.clone());
+            if !child.collapsed {
+                Self::collect_paths(child, prefix, visible_paths);
+            }
+            prefix.pop();
+        }
+    }
+
+    fn node(&self, path: &[usize]) -> Option<&OverlayNode> {
+        let mut current = &self.root;
+        for &idx in path {
+            current = current.children.get(idx)?;
+        }
+        Some(current)
+    }
+
+    fn node_mut(&mut self, path: &[usize]) -> Option<&mut OverlayNode> {
+        let mut current = &mut self.root;
+        for &idx in path {
+            current = current.children.get_mut(idx)?;
+        }
+        Some(current)
     }
 
     fn save_and_exit(&mut self) -> bool {
@@ -324,6 +538,28 @@ impl ContextOverlay {
     }
 }
 
+impl OverlayNode {
+    fn set_descendants_collapsed(&mut self, collapsed: bool, changed: &mut Vec<String>) {
+        for child in &mut self.children {
+            if child.collapsed != collapsed {
+                child.collapsed = collapsed;
+                changed.push(child.id.clone());
+            }
+            child.set_descendants_collapsed(collapsed, changed);
+        }
+    }
+
+    fn set_descendants_selected(&mut self, selected: bool, changed: &mut Vec<String>) {
+        if self.selected != selected {
+            self.selected = selected;
+            changed.push(self.id.clone());
+        }
+        for child in &mut self.children {
+            child.set_descendants_selected(selected, changed);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExitAction {
     Save,
@@ -334,7 +570,7 @@ fn render_hint_segment(keys: &[KeyBinding], desc: &str) -> Vec<Span<'static>> {
     if keys.is_empty() {
         return Vec::new();
     }
-    let mut spans: Vec<Span<'static>> = vec![Span::from("  ")];
+    let mut spans = vec![Span::from("  ")];
     for (i, key) in keys.iter().enumerate() {
         if i > 0 {
             spans.push(Span::from("/"));
@@ -345,157 +581,169 @@ fn render_hint_segment(keys: &[KeyBinding], desc: &str) -> Vec<Span<'static>> {
     spans
 }
 
-struct ContextEntry {
-    id: i64,
-    selected: bool,
-    label: String,
-    lines: Vec<Line<'static>>,
-}
-
-impl ContextEntry {
-    fn from_prompt_item(idx: usize, item: PromptContextItem) -> Self {
-        let (label, detail) = describe_item(idx, &item.item);
-        let lines = detail
-            .lines()
-            .map(|line| Line::from(line.to_string()))
-            .collect();
-        Self {
-            id: item.id,
-            selected: item.selected,
-            label,
-            lines,
-        }
+fn detail_lines_for_node(node: &OverlayNode) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    lines.push(Line::from(node.title.clone().bold()));
+    if !node.labels.is_empty() {
+        lines.push(Line::from(vec![
+            "Labels: ".dim(),
+            node.labels.join("/").into(),
+        ]));
     }
-
-    fn from_strings(label: &str, lines: Vec<String>) -> Self {
-        let lines = lines
-            .into_iter()
-            .map(|line| Line::from(line))
-            .collect::<Vec<_>>();
-        Self {
-            id: -1,
-            selected: true,
-            label: label.to_string(),
-            lines,
-        }
-    }
-}
-
-fn build_entries(items: Vec<PromptContextItem>) -> Vec<ContextEntry> {
-    if items.is_empty() {
-        return vec![ContextEntry::from_strings(
-            "conversation is empty",
-            vec!["This conversation has no history items yet.".to_string()],
-        )];
-    }
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(idx, item)| ContextEntry::from_prompt_item(idx, item))
-        .collect()
-}
-
-fn describe_item(idx: usize, item: &ResponseItem) -> (String, String) {
-    match item {
-        ResponseItem::Message { role, content, .. } => {
-            let body = render_content_items(content);
-            let snippet = truncate_text(&body, 40);
-            (
-                format!("{role}: {snippet}"),
-                format!("Message #{}\nRole: {role}\n\n{body}", idx + 1),
-            )
-        }
-        ResponseItem::Reasoning {
-            summary, content, ..
-        } => {
-            let mut parts: Vec<String> = summary
-                .iter()
-                .filter_map(|s| match s {
-                    codex_protocol::models::ReasoningItemReasoningSummary::SummaryText { text } => {
-                        Some(text.clone())
-                    }
-                })
-                .collect();
-            if let Some(content) = content {
-                for c in content {
-                    if let codex_protocol::models::ReasoningItemContent::ReasoningText { text } = c
-                    {
-                        parts.push(text.clone());
-                    }
-                }
-            }
-            let body = if parts.is_empty() {
-                "No reasoning text provided.".to_string()
-            } else {
-                parts.join("\n\n")
-            };
-            ("reasoning".to_string(), body)
-        }
-        ResponseItem::FunctionCall {
-            name, arguments, ..
-        } => {
-            let args = pretty_json(arguments).unwrap_or_else(|| arguments.clone());
-            (
-                format!("function call: {name}"),
-                format!("Function: {name}\nArguments:\n{args}"),
-            )
-        }
-        ResponseItem::FunctionCallOutput { call_id, output } => {
-            let success = output.success.unwrap_or(true);
-            (
-                format!("function output ({call_id})"),
-                format!("Function output (success={}):\n{}", success, output.content),
-            )
-        }
-        ResponseItem::CustomToolCall { name, input, .. } => (
-            format!("tool call: {name}"),
-            format!("Tool call `{name}` with input:\n{input}"),
-        ),
-        ResponseItem::CustomToolCallOutput { call_id, output } => (
-            format!("tool output ({call_id})"),
-            format!("Tool output:\n{output}"),
-        ),
-        ResponseItem::LocalShellCall { status, action, .. } => {
-            let details = match action {
-                LocalShellAction::Exec(exec) => {
-                    let cmd = exec.command.join(" ");
-                    format!("Command: {cmd}\nStatus: {status:?}")
-                }
-            };
-            ("local shell call".to_string(), details)
-        }
-        ResponseItem::WebSearchCall { action, .. } => (
-            "web search".to_string(),
-            format!("Search action: {action:?}"),
-        ),
-        ResponseItem::GhostSnapshot { .. } => (
-            "ghost snapshot".to_string(),
-            "Ghost snapshot (not sent to the model).".to_string(),
-        ),
-        ResponseItem::Other => ("other item".to_string(), format!("{item:?}")),
-    }
-}
-
-fn render_content_items(items: &[ContentItem]) -> String {
-    let mut out: Vec<String> = Vec::new();
-    for item in items {
-        match item {
-            ContentItem::InputText { text } => out.push(text.clone()),
-            ContentItem::OutputText { text } => out.push(text.clone()),
-            ContentItem::InputImage { image_url } => {
-                out.push(format!("[image] {image_url}"));
-            }
-        }
-    }
-    if out.is_empty() {
-        "—".to_string()
+    if node.summary.is_empty() {
+        lines.push(Line::from("No summary available.".dim()));
     } else {
-        out.join("\n")
+        for part in node.summary.lines() {
+            lines.push(render_markdown_line(part));
+        }
+    }
+    lines.push(Line::from(String::new()));
+    lines.push(Line::from(vec!["Node ID: ".dim(), node.id.clone().into()]));
+    lines
+}
+
+fn render_markdown_line(line: &str) -> Line<'static> {
+    let trimmed_start = line.trim_start();
+    let indent_len = line.len().saturating_sub(trimmed_start.len());
+    let indent = &line[..indent_len];
+    let content = trimmed_start.trim();
+
+    let mut spans = Vec::new();
+    if !indent.is_empty() {
+        spans.push(Span::from(indent.to_string()));
+    }
+
+    if content.is_empty() {
+        spans.push(Span::from(String::new()));
+        return Line::from(spans);
+    }
+
+    let mut base_style = Style::default();
+    let heading_prefixes = ["###### ", "##### ", "#### ", "### ", "## ", "# "];
+    for prefix in heading_prefixes {
+        if let Some(stripped) = content.strip_prefix(prefix) {
+            base_style = base_style.add_modifier(Modifier::BOLD);
+            let remainder = stripped.trim_start();
+            let mut inline = inline_spans(remainder, base_style);
+            spans.append(&mut inline);
+            return Line::from(spans);
+        }
+    }
+
+    let mut remainder = content;
+    if remainder.starts_with("- ") || remainder.starts_with("* ") {
+        spans.push("• ".dim());
+        remainder = remainder[2..].trim_start();
+    }
+
+    let mut inline = inline_spans(remainder, base_style);
+    spans.append(&mut inline);
+    if spans.is_empty() {
+        spans.push(Span::from(String::new()));
+    }
+    Line::from(spans)
+}
+
+fn inline_spans(text: &str, base_style: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    let mut buffer = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let chars: Vec<char> = text.chars().collect();
+    let mut idx = 0;
+    while idx < chars.len() {
+        if chars[idx] == '*' {
+            let double_star = idx + 1 < chars.len() && chars[idx + 1] == '*';
+            flush_markdown_span(&mut spans, &mut buffer, base_style, bold, italic);
+            if double_star {
+                bold = !bold;
+                idx += 2;
+            } else {
+                italic = !italic;
+                idx += 1;
+            }
+            continue;
+        }
+        buffer.push(chars[idx]);
+        idx += 1;
+    }
+    flush_markdown_span(&mut spans, &mut buffer, base_style, bold, italic);
+    if spans.is_empty() {
+        spans.push(Span::from(String::new()));
+    }
+    spans
+}
+
+fn flush_markdown_span(
+    spans: &mut Vec<Span<'static>>,
+    buffer: &mut String,
+    base_style: Style,
+    bold: bool,
+    italic: bool,
+) {
+    if buffer.is_empty() {
+        return;
+    }
+    let mut style = base_style;
+    if bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    spans.push(Span::styled(buffer.clone(), style));
+    buffer.clear();
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionState {
+    Selected,
+    Unselected,
+    Partial,
+    None,
+}
+
+fn selection_state(node: &OverlayNode) -> SelectionState {
+    if node.children.is_empty() {
+        return if node.selected {
+            SelectionState::Selected
+        } else {
+            SelectionState::Unselected
+        };
+    }
+    let mut total = 0;
+    let mut selected = 0;
+    for child in &node.children {
+        match selection_state(child) {
+            SelectionState::Selected => {
+                selected += 1;
+                total += 1;
+            }
+            SelectionState::Unselected => {
+                total += 1;
+            }
+            SelectionState::Partial => {
+                return SelectionState::Partial;
+            }
+            SelectionState::None => {}
+        }
+    }
+    if total == 0 {
+        SelectionState::None
+    } else if selected == total {
+        SelectionState::Selected
+    } else if selected == 0 {
+        SelectionState::Unselected
+    } else {
+        SelectionState::Partial
     }
 }
 
-fn pretty_json(raw: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(raw)
-        .map(|value| serde_json::to_string_pretty(&value).unwrap_or_else(|_| raw.to_string()))
-        .ok()
+fn selection_marker(state: SelectionState) -> &'static str {
+    match state {
+        SelectionState::Selected => "[x]",
+        SelectionState::Unselected => "[ ]",
+        SelectionState::Partial => "[~]",
+        SelectionState::None => "[ ]",
+    }
 }

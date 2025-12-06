@@ -95,6 +95,13 @@ pub struct Config {
     /// Info needed to make an API request to the model.
     pub model_provider: ModelProviderInfo,
 
+    /// Optional override for prompt-context summaries.
+    pub context_model: Option<String>,
+    /// Provider used for prompt-context summaries.
+    pub context_model_provider_id: Option<String>,
+    pub context_model_provider: Option<ModelProviderInfo>,
+    pub context_model_family: Option<ModelFamily>,
+
     /// Approval policy for executing commands.
     pub approval_policy: AskForApproval,
 
@@ -574,6 +581,11 @@ pub struct ConfigToml {
 
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
+
+    /// Optional override for prompt-context summaries.
+    pub ctx_model: Option<String>,
+    /// Provider used for `ctx_model`. Defaults to `model_provider` when unset.
+    pub ctx_model_provider: Option<String>,
 
     /// Default approval policy for executing commands.
     pub approval_policy: Option<AskForApproval>,
@@ -1084,6 +1096,31 @@ impl Config {
             })?
             .clone();
 
+        let ctx_model = config_profile.ctx_model.clone().or(cfg.ctx_model.clone());
+        let ctx_model_provider_id = config_profile
+            .ctx_model_provider
+            .clone()
+            .or(cfg.ctx_model_provider.clone());
+        let ctx_model_provider = if let Some(ref provider_id) = ctx_model_provider_id {
+            let provider = model_providers
+                .get(provider_id.as_str())
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("Model provider `{provider_id}` not found"),
+                    )
+                })?
+                .clone();
+            Some(provider)
+        } else {
+            None
+        };
+
+        let ctx_model_family = ctx_model.as_deref().map(|model_slug| {
+            find_family_for_model(model_slug)
+                .unwrap_or_else(|| derive_default_model_family(model_slug))
+        });
+
         let shell_environment_policy = cfg.shell_environment_policy.into();
 
         let history = cfg.history.unwrap_or_default();
@@ -1182,6 +1219,10 @@ impl Config {
             model_auto_compact_token_limit,
             model_provider_id,
             model_provider,
+            context_model: ctx_model,
+            context_model_provider_id: ctx_model_provider_id,
+            context_model_provider: ctx_model_provider,
+            context_model_family: ctx_model_family,
             cwd: resolved_cwd,
             approval_policy,
             sandbox_policy,
@@ -2965,6 +3006,10 @@ model_verbosity = "high"
                 model_auto_compact_token_limit: Some(180_000),
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
+                context_model: None,
+                context_model_provider_id: None,
+                context_model_provider: None,
+                context_model_family: None,
                 approval_policy: AskForApproval::Never,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
@@ -3038,6 +3083,10 @@ model_verbosity = "high"
             model_auto_compact_token_limit: Some(14_746),
             model_provider_id: "openai-chat-completions".to_string(),
             model_provider: fixture.openai_chat_completions_provider.clone(),
+            context_model: None,
+            context_model_provider_id: None,
+            context_model_provider: None,
+            context_model_family: None,
             approval_policy: AskForApproval::UnlessTrusted,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
@@ -3126,6 +3175,10 @@ model_verbosity = "high"
             model_auto_compact_token_limit: Some(180_000),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
+            context_model: None,
+            context_model_provider_id: None,
+            context_model_provider: None,
+            context_model_family: None,
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
@@ -3200,6 +3253,10 @@ model_verbosity = "high"
             model_auto_compact_token_limit: Some(244_800),
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
+            context_model: None,
+            context_model_provider_id: None,
+            context_model_provider: None,
+            context_model_family: None,
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,

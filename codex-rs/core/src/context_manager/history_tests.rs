@@ -9,7 +9,6 @@ use codex_protocol::models::LocalShellExecAction;
 use codex_protocol::models::LocalShellStatus;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
-use codex_protocol::protocol::PromptContextSelection;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 
@@ -26,63 +25,11 @@ fn assistant_msg(text: &str) -> ResponseItem {
     }
 }
 
-#[test]
-fn prompt_selection_filters_items() {
-    let items = vec![user_msg("remove me"), assistant_msg("keep me")];
-    let mut history = create_history_with_items(items);
-    let context_items = history.prompt_context_items();
-    let first_id = context_items
-        .first()
-        .expect("expected at least one context item")
-        .id;
-    history.apply_selections(&[PromptContextSelection {
-        id: first_id,
-        selected: false,
-    }]);
-    let prompt_items = history.get_history_for_prompt();
-    assert_eq!(
-        prompt_items,
-        vec![assistant_msg("keep me")],
-        "unselected items should be omitted from the prompt"
-    );
-}
-
-#[test]
-fn replace_preserves_selection_and_ids() {
-    let mut history = create_history_with_items(vec![user_msg("keep"), assistant_msg("stay")]);
-    let initial_items = history.prompt_context_items();
-    let first_id = initial_items
-        .first()
-        .expect("expected at least one context item")
-        .id;
-    history.apply_selections(&[PromptContextSelection {
-        id: first_id,
-        selected: false,
-    }]);
-
-    let before_replace = history.prompt_context_items();
-    let rebuilt_source = history.contents();
-    history.replace(rebuilt_source);
-    let after_replace = history.prompt_context_items();
-
-    assert_eq!(before_replace.len(), after_replace.len());
-    assert_eq!(
-        before_replace.first().unwrap().id,
-        after_replace.first().unwrap().id,
-        "expected ids to persist across replace"
-    );
-    assert_eq!(
-        before_replace.first().unwrap().selected,
-        after_replace.first().unwrap().selected,
-        "expected selection to persist across replace"
-    );
-}
-
 fn create_history_with_items(items: Vec<ResponseItem>) -> ContextManager {
     let mut h = ContextManager::new();
     // Use a generous but fixed token budget; tests only rely on truncation
     // behavior, not on a specific model's token limit.
-    h.record_items(items.iter(), TruncationPolicy::Tokens(10_000));
+    h.record_items(items.iter(), TruncationPolicy::Tokens(10_000), None);
     h
 }
 
@@ -137,12 +84,12 @@ fn filters_non_api_messages() {
         }],
     };
     let reasoning = reasoning_msg("thinking...");
-    h.record_items([&system, &reasoning, &ResponseItem::Other], policy);
+    h.record_items([&system, &reasoning, &ResponseItem::Other], policy, None);
 
     // User and assistant should be retained.
     let u = user_msg("hi");
     let a = assistant_msg("hello");
-    h.record_items([&u, &a], policy);
+    h.record_items([&u, &a], policy, None);
 
     let items = h.contents();
     assert_eq!(
@@ -346,7 +293,7 @@ fn record_items_truncates_function_call_output_content() {
         },
     };
 
-    history.record_items([&item], policy);
+    history.record_items([&item], policy, None);
 
     assert_eq!(history.items.len(), 1);
     match &history.items[0] {
@@ -378,7 +325,7 @@ fn record_items_truncates_custom_tool_call_output_content() {
         output: long_output.clone(),
     };
 
-    history.record_items([&item], policy);
+    history.record_items([&item], policy, None);
 
     assert_eq!(history.items.len(), 1);
     match &history.items[0] {
@@ -411,7 +358,7 @@ fn record_items_respects_custom_token_limit() {
         },
     };
 
-    history.record_items([&item], policy);
+    history.record_items([&item], policy, None);
 
     let stored = match &history.items[0] {
         ResponseItem::FunctionCallOutput { output, .. } => output,

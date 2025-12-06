@@ -32,6 +32,7 @@ use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TaskStartedEvent;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnContextItem;
@@ -133,6 +134,8 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::InitialHistory;
+use codex_protocol::protocol::PromptContextActions;
+use codex_protocol::protocol::PromptContextTree;
 use codex_protocol::user_input::UserInput;
 use codex_utils_readiness::Readiness;
 use codex_utils_readiness::ReadinessFlag;
@@ -262,6 +265,7 @@ pub(crate) struct Session {
     conversation_id: ConversationId,
     tx_event: Sender<Event>,
     state: Mutex<SessionState>,
+    history: Arc<tokio::sync::Mutex<ContextManager>>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     next_internal_sub_id: AtomicU64,
@@ -410,7 +414,7 @@ impl Session {
             per_turn_config.model_context_window = Some(model_info.context_window);
         }
 
-        let otel_event_manager = otel_event_manager.clone().with_model(
+        let per_turn_otel_event_manager = otel_event_manager.clone().with_model(
             session_configuration.model.as_str(),
             session_configuration.model.as_str(),
         );
@@ -418,7 +422,7 @@ impl Session {
         let client = ModelClient::new(
             Arc::new(per_turn_config.clone()),
             auth_manager,
-            otel_event_manager,
+            per_turn_otel_event_manager,
             provider,
             session_configuration.model_reasoning_effort,
             session_configuration.model_reasoning_summary,
@@ -449,6 +453,46 @@ impl Session {
             exec_policy: session_configuration.exec_policy.clone(),
             truncation_policy: TruncationPolicy::new(&per_turn_config),
         }
+    }
+
+    fn make_context_client(
+        auth_manager: Option<Arc<AuthManager>>,
+        otel_event_manager: &OtelEventManager,
+        session_configuration: &SessionConfiguration,
+        conversation_id: ConversationId,
+        session_source: SessionSource,
+    ) -> Option<ModelClient> {
+        let config = session_configuration.original_config_do_not_use.clone();
+        let mut per_turn_config = (*config).clone();
+
+        per_turn_config.model = per_turn_config.context_model.clone()?;
+        per_turn_config.model_family = per_turn_config.context_model_family.clone()?;
+        per_turn_config.model_reasoning_effort = session_configuration.model_reasoning_effort;
+        per_turn_config.model_reasoning_summary = session_configuration.model_reasoning_summary;
+        if let Some(model_info) = get_model_info(&per_turn_config.model_family) {
+            per_turn_config.model_context_window = Some(model_info.context_window);
+        }
+
+        let provider = config
+            .context_model_provider
+            .clone()
+            .unwrap_or_else(|| session_configuration.provider.clone());
+
+        let otel_event_manager = otel_event_manager.clone().with_model(
+            per_turn_config.model.as_str(),
+            per_turn_config.model.as_str(),
+        );
+
+        Some(ModelClient::new(
+            Arc::new(per_turn_config),
+            auth_manager,
+            otel_event_manager,
+            provider,
+            session_configuration.model_reasoning_effort,
+            session_configuration.model_reasoning_summary,
+            conversation_id,
+            session_source,
+        ))
     }
 
     async fn new(
@@ -553,6 +597,17 @@ impl Session {
             config.active_profile.clone(),
         );
 
+        let context_conversation_id = ConversationId::default();
+        let context_session_source =
+            SessionSource::SubAgent(SubAgentSource::Other("context-tree".to_string()));
+        let context_model = Self::make_context_client(
+            Some(Arc::clone(&auth_manager)),
+            &otel_event_manager,
+            &session_configuration,
+            context_conversation_id,
+            context_session_source,
+        );
+
         // Create the mutable state for the Session.
         let state = SessionState::new(session_configuration.clone());
 
@@ -573,6 +628,9 @@ impl Session {
             conversation_id,
             tx_event: tx_event.clone(),
             state: Mutex::new(state),
+            history: Arc::new(Mutex::new(ContextManager::with_context_model(
+                context_model,
+            ))),
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
@@ -662,8 +720,8 @@ impl Session {
     }
 
     async fn get_total_token_usage(&self) -> i64 {
-        let state = self.state.lock().await;
-        state.get_total_token_usage()
+        let history = self.history.lock().await;
+        history.get_total_token_usage()
     }
 
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
@@ -724,6 +782,7 @@ impl Session {
                 self.flush_rollout().await;
             }
         }
+        self.commit_context_tree().await;
     }
 
     pub(crate) async fn update_settings(&self, updates: SessionSettingsUpdate) {
@@ -1001,6 +1060,7 @@ impl Session {
                     history.record_items(
                         std::iter::once(response_item),
                         turn_context.truncation_policy,
+                        None,
                     );
                 }
                 RolloutItem::Compacted(compacted) => {
@@ -1030,13 +1090,36 @@ impl Session {
         items: &[ResponseItem],
         turn_context: &TurnContext,
     ) {
-        let mut state = self.state.lock().await;
-        state.record_items(items.iter(), turn_context.truncation_policy);
+        let mut history = self.history.lock().await;
+        history.record_items(
+            items.iter(),
+            turn_context.truncation_policy,
+            Some(turn_context.sub_id.as_str()),
+        );
     }
 
     pub(crate) async fn replace_history(&self, items: Vec<ResponseItem>) {
-        let mut state = self.state.lock().await;
-        state.replace_history(items);
+        let mut history = self.history.lock().await;
+        history.replace(items);
+    }
+
+    pub(crate) async fn commit_context_tree(&self) {
+        let mut history = Arc::clone(&self.history).lock_owned().await;
+        history.commit_context_tree().await;
+    }
+
+    pub(crate) async fn prompt_context_tree(&self) -> PromptContextTree {
+        let history = self.history.lock().await;
+        history.context_tree()
+    }
+
+    pub(crate) async fn apply_prompt_context_actions(
+        &self,
+        actions: &[PromptContextActions],
+    ) -> PromptContextTree {
+        let mut history = self.history.lock().await;
+        history.apply_context_actions(actions);
+        history.context_tree()
     }
 
     async fn persist_rollout_response_items(&self, items: &[ResponseItem]) {
@@ -1103,8 +1186,8 @@ impl Session {
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {
-        let state = self.state.lock().await;
-        state.clone_history()
+        let history = self.history.lock().await;
+        history.clone()
     }
 
     pub(crate) async fn update_token_usage_info(
@@ -1113,12 +1196,10 @@ impl Session {
         token_usage: Option<&TokenUsage>,
     ) {
         {
-            let mut state = self.state.lock().await;
+            let mut history = self.history.lock().await;
             if let Some(token_usage) = token_usage {
-                state.update_token_info_from_usage(
-                    token_usage,
-                    turn_context.client.get_model_context_window(),
-                );
+                history
+                    .update_token_info(token_usage, turn_context.client.get_model_context_window());
             }
         }
         self.send_token_count_event(turn_context).await;
@@ -1133,8 +1214,8 @@ impl Session {
             return;
         };
         {
-            let mut state = self.state.lock().await;
-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
+            let mut history = self.history.lock().await;
+            let mut info = history.token_info().unwrap_or(TokenUsageInfo {
                 total_token_usage: TokenUsage::default(),
                 last_token_usage: TokenUsage::default(),
                 model_context_window: None,
@@ -1152,7 +1233,7 @@ impl Session {
                 info.model_context_window = turn_context.client.get_model_context_window();
             }
 
-            state.set_token_info(Some(info));
+            history.set_token_info(Some(info));
         }
         self.send_token_count_event(turn_context).await;
     }
@@ -1170,9 +1251,13 @@ impl Session {
     }
 
     async fn send_token_count_event(&self, turn_context: &TurnContext) {
-        let (info, rate_limits) = {
+        let rate_limits = {
             let state = self.state.lock().await;
-            state.token_info_and_rate_limits()
+            state.rate_limits()
+        };
+        let info = {
+            let history = self.history.lock().await;
+            history.token_info()
         };
         let event = EventMsg::TokenCount(TokenCountEvent { info, rate_limits });
         self.send_event(turn_context, event).await;
@@ -1182,8 +1267,8 @@ impl Session {
         let context_window = turn_context.client.get_model_context_window();
         if let Some(context_window) = context_window {
             {
-                let mut state = self.state.lock().await;
-                state.set_token_usage_full(context_window);
+                let mut history = self.history.lock().await;
+                history.set_token_usage_full(context_window);
             }
             self.send_token_count_event(turn_context).await;
         }
@@ -1468,8 +1553,8 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             Op::GetPromptContext => {
                 handlers::get_prompt_context(&sess, sub.id.clone()).await;
             }
-            Op::UpdatePromptContextSelection { selections } => {
-                handlers::update_prompt_context(&sess, sub.id.clone(), selections).await;
+            Op::UpdatePromptContext { actions } => {
+                handlers::update_prompt_context(&sess, sub.id.clone(), actions).await;
             }
             _ => {} // Ignore unknown ops; enum is non_exhaustive to allow extensions.
         }
@@ -1497,8 +1582,8 @@ mod handlers {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ListCustomPromptsResponseEvent;
     use codex_protocol::protocol::Op;
+    use codex_protocol::protocol::PromptContextActions;
     use codex_protocol::protocol::PromptContextResponseEvent;
-    use codex_protocol::protocol::PromptContextSelection;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
     use codex_protocol::protocol::TurnAbortReason;
@@ -1807,11 +1892,10 @@ mod handlers {
     }
 
     pub async fn get_prompt_context(sess: &Arc<Session>, sub_id: String) {
-        let mut history = sess.clone_history().await;
-        let items = history.prompt_context_items();
+        let tree = sess.prompt_context_tree().await;
         let event = Event {
             id: sub_id,
-            msg: EventMsg::GetPromptContextResponse(PromptContextResponseEvent { items }),
+            msg: EventMsg::GetPromptContextResponse(PromptContextResponseEvent { tree }),
         };
         sess.send_event_raw(event).await;
     }
@@ -1819,16 +1903,14 @@ mod handlers {
     pub async fn update_prompt_context(
         sess: &Arc<Session>,
         sub_id: String,
-        selections: Vec<PromptContextSelection>,
+        actions: PromptContextActions,
     ) {
-        let mut state = sess.state.lock().await;
-        state.history.apply_selections(&selections);
-        let mut history = state.history.clone();
-        drop(state);
-        let items = history.prompt_context_items();
+        let tree = sess
+            .apply_prompt_context_actions(std::slice::from_ref(&actions))
+            .await;
         let event = Event {
             id: sub_id,
-            msg: EventMsg::UpdatePromptContextResponse(PromptContextResponseEvent { items }),
+            msg: EventMsg::UpdatePromptContextResponse(PromptContextResponseEvent { tree }),
         };
         sess.send_event_raw(event).await;
     }
@@ -1981,7 +2063,9 @@ pub(crate) async fn run_task(
         let turn_input: Vec<ResponseItem> = {
             sess.record_conversation_items(&turn_context, &pending_input)
                 .await;
-            sess.clone_history().await.get_history_for_prompt()
+            let mut history = sess.history.lock().await;
+            history.commit_context_tree().await;
+            history.get_history_for_prompt()
         };
 
         let turn_input_messages = turn_input
@@ -2539,9 +2623,7 @@ mod tests {
             },
         )));
 
-        let actual = tokio_test::block_on(async {
-            session.state.lock().await.clone_history().get_history()
-        });
+        let actual = tokio_test::block_on(async { session.clone_history().await.get_history() });
         assert_eq!(expected, actual);
     }
 
@@ -2552,9 +2634,7 @@ mod tests {
 
         tokio_test::block_on(session.record_initial_history(InitialHistory::Forked(rollout_items)));
 
-        let actual = tokio_test::block_on(async {
-            session.state.lock().await.clone_history().get_history()
-        });
+        let actual = tokio_test::block_on(async { session.clone_history().await.get_history() });
         assert_eq!(expected, actual);
     }
 
@@ -2744,6 +2824,7 @@ mod tests {
             conversation_id,
             tx_event,
             state: Mutex::new(state),
+            history: Arc::new(Mutex::new(ContextManager::new())),
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
@@ -2822,6 +2903,7 @@ mod tests {
             conversation_id,
             tx_event,
             state: Mutex::new(state),
+            history: Arc::new(Mutex::new(ContextManager::new())),
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
@@ -3040,7 +3122,7 @@ mod tests {
         for item in &initial_context {
             rollout_items.push(RolloutItem::ResponseItem(item.clone()));
         }
-        live_history.record_items(initial_context.iter(), turn_context.truncation_policy);
+        live_history.record_items(initial_context.iter(), turn_context.truncation_policy, None);
 
         let user1 = ResponseItem::Message {
             id: None,
@@ -3049,7 +3131,11 @@ mod tests {
                 text: "first user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user1), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&user1),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(user1.clone()));
 
         let assistant1 = ResponseItem::Message {
@@ -3059,7 +3145,11 @@ mod tests {
                 text: "assistant reply one".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant1), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&assistant1),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(assistant1.clone()));
 
         let summary1 = "summary one";
@@ -3083,7 +3173,11 @@ mod tests {
                 text: "second user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user2), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&user2),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(user2.clone()));
 
         let assistant2 = ResponseItem::Message {
@@ -3093,7 +3187,11 @@ mod tests {
                 text: "assistant reply two".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant2), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&assistant2),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(assistant2.clone()));
 
         let summary2 = "summary two";
@@ -3117,7 +3215,11 @@ mod tests {
                 text: "third user".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&user3), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&user3),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(user3.clone()));
 
         let assistant3 = ResponseItem::Message {
@@ -3127,7 +3229,11 @@ mod tests {
                 text: "assistant reply three".to_string(),
             }],
         };
-        live_history.record_items(std::iter::once(&assistant3), turn_context.truncation_policy);
+        live_history.record_items(
+            std::iter::once(&assistant3),
+            turn_context.truncation_policy,
+            None,
+        );
         rollout_items.push(RolloutItem::ResponseItem(assistant3.clone()));
 
         (rollout_items, live_history.get_history())

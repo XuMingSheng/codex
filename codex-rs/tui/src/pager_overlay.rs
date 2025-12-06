@@ -13,7 +13,7 @@ use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
-use codex_protocol::protocol::PromptContextItem;
+use codex_protocol::protocol::PromptContextTree;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -51,6 +51,7 @@ impl Overlay {
     ) -> Self {
         Self::Static(StaticOverlay::with_renderables(renderables, title))
     }
+
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
@@ -59,16 +60,16 @@ impl Overlay {
         }
     }
 
+    pub(crate) fn new_context(tree: Option<PromptContextTree>) -> Self {
+        Self::Context(ContextOverlay::new(tree))
+    }
+
     pub(crate) fn is_done(&self) -> bool {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
             Overlay::Context(o) => o.is_done(),
         }
-    }
-
-    pub(crate) fn new_context(entries: Vec<PromptContextItem>) -> Self {
-        Self::Context(ContextOverlay::new(entries))
     }
 }
 

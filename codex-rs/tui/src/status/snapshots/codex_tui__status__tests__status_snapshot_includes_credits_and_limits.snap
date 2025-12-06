@@ -11,6 +11,7 @@ expression: sanitized
 │ information on rate limits and credits                            │
 │                                                                   │
 │  Model:            gpt-5.1-codex (reasoning none, summaries auto) │
+│  Context model:    same as gpt-5.1-codex (provider: openai)       │
 │  Directory: [[workspace]]                                         │
 │  Approval:         on-request                                     │
 │  Sandbox:          read-only                                      │

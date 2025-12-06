@@ -168,6 +168,7 @@ impl Session {
             *active = None;
         }
         drop(active);
+        self.commit_context_tree().await;
         let event = EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message });
         self.send_event(turn_context.as_ref(), event).await;
     }
@@ -216,6 +217,7 @@ impl Session {
             .abort(session_ctx, Arc::clone(&task.turn_context))
             .await;
 
+        self.commit_context_tree().await;
         let event = EventMsg::TurnAborted(TurnAbortedEvent { reason });
         self.send_event(task.turn_context.as_ref(), event).await;
     }

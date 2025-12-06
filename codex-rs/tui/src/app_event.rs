@@ -6,7 +6,7 @@ use codex_core::protocol::ConversationPathResponseEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_file_search::FileMatch;
-use codex_protocol::protocol::PromptContextItem;
+use codex_protocol::protocol::PromptContextTree;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::history_cell::HistoryCell;
@@ -170,7 +170,7 @@ pub(crate) enum AppEvent {
 
     /// Open the prompt context overlay with the provided snapshot.
     OpenPromptContext {
-        items: Vec<PromptContextItem>,
+        tree: Option<PromptContextTree>,
     },
 }
 

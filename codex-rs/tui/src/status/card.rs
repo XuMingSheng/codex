@@ -55,6 +55,7 @@ pub(crate) struct StatusTokenUsageData {
 struct StatusHistoryCell {
     model_name: String,
     model_details: Vec<String>,
+    context_model_display: String,
     directory: PathBuf,
     approval: String,
     sandbox: String,
@@ -100,6 +101,17 @@ impl StatusHistoryCell {
     ) -> Self {
         let config_entries = create_config_summary_entries(config);
         let (model_name, model_details) = compose_model_display(config, &config_entries);
+        let context_model_display = {
+            let provider = config
+                .context_model_provider_id
+                .as_deref()
+                .unwrap_or(&config.model_provider_id);
+            if let Some(ctx_model) = &config.context_model {
+                format!("{ctx_model} (provider: {provider})")
+            } else {
+                format!("same as {} (provider: {provider})", config.model.as_str())
+            }
+        };
         let approval = config_entries
             .iter()
             .find(|(k, _)| *k == "approval")
@@ -132,6 +144,7 @@ impl StatusHistoryCell {
         Self {
             model_name,
             model_details,
+            context_model_display,
             directory: config.cwd.clone(),
             approval,
             sandbox,
@@ -310,11 +323,17 @@ impl HistoryCell for StatusHistoryCell {
             }
         });
 
-        let mut labels: Vec<String> =
-            vec!["Model", "Directory", "Approval", "Sandbox", "Agents.md"]
-                .into_iter()
-                .map(str::to_string)
-                .collect();
+        let mut labels: Vec<String> = vec![
+            "Model",
+            "Context model",
+            "Directory",
+            "Approval",
+            "Sandbox",
+            "Agents.md",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         let mut seen: BTreeSet<String> = labels.iter().cloned().collect();
 
         if account_value.is_some() {
@@ -359,6 +378,10 @@ impl HistoryCell for StatusHistoryCell {
         let directory_value = format_directory_display(&self.directory, Some(value_width));
 
         lines.push(formatter.line("Model", model_spans));
+        lines.push(formatter.line(
+            "Context model",
+            vec![Span::from(self.context_model_display.clone())],
+        ));
         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
         lines.push(formatter.line("Approval", vec![Span::from(self.approval.clone())]));
         lines.push(formatter.line("Sandbox", vec![Span::from(self.sandbox.clone())]));

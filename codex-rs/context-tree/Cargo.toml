@@ -1,0 +1,24 @@
+[package]
+edition.workspace = true
+license.workspace = true
+name = "codex-context-tree"
+version.workspace = true
+
+[lib]
+name = "codex_context_tree"
+path = "src/lib.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-recursion = "1.0"
+async-trait = { workspace = true }
+codex-protocol = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

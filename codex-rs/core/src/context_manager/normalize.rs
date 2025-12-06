@@ -3,19 +3,21 @@ use std::collections::HashSet;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 
-use crate::context_manager::history::ContextEntry;
 use crate::util::error_or_panic;
 
-pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ContextEntry>, next_id: &mut i64) {
+pub(crate) fn ensure_call_outputs_present<F>(items: &mut Vec<ResponseItem>, mut on_insert: F)
+where
+    F: FnMut(usize, &ResponseItem),
+{
     // Collect synthetic outputs to insert immediately after their calls.
     // Store the insertion position (index of call) alongside the item so
     // we can insert in reverse order and avoid index shifting.
     let mut missing_outputs_to_insert: Vec<(usize, ResponseItem)> = Vec::new();
 
-    for (idx, entry) in items.iter().enumerate() {
-        match &entry.item {
+    for (idx, item) in items.iter().enumerate() {
+        match item {
             ResponseItem::FunctionCall { call_id, .. } => {
-                let has_output = items.iter().any(|i| match &i.item {
+                let has_output = items.iter().any(|i| match i {
                     ResponseItem::FunctionCallOutput {
                         call_id: existing, ..
                     } => existing == call_id,
@@ -39,7 +41,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ContextEntry>, next_id
                 }
             }
             ResponseItem::CustomToolCall { call_id, .. } => {
-                let has_output = items.iter().any(|i| match &i.item {
+                let has_output = items.iter().any(|i| match i {
                     ResponseItem::CustomToolCallOutput {
                         call_id: existing, ..
                     } => existing == call_id,
@@ -62,7 +64,7 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ContextEntry>, next_id
             // LocalShellCall is represented in upstream streams by a FunctionCallOutput
             ResponseItem::LocalShellCall { call_id, .. } => {
                 if let Some(call_id) = call_id.as_ref() {
-                    let has_output = items.iter().any(|i| match &i.item {
+                    let has_output = items.iter().any(|i| match i {
                         ResponseItem::FunctionCallOutput {
                             call_id: existing, ..
                         } => existing == call_id,
@@ -92,23 +94,19 @@ pub(crate) fn ensure_call_outputs_present(items: &mut Vec<ContextEntry>, next_id
 
     // Insert synthetic outputs in reverse index order to avoid re-indexing.
     for (idx, output_item) in missing_outputs_to_insert.into_iter().rev() {
-        let id = *next_id;
-        *next_id += 1;
-        items.insert(
-            idx + 1,
-            ContextEntry {
-                id,
-                selected: true,
-                item: output_item,
-            },
-        );
+        let insertion_index = idx + 1;
+        on_insert(insertion_index, &output_item);
+        items.insert(insertion_index, output_item);
     }
 }
 
-pub(crate) fn remove_orphan_outputs(items: &mut Vec<ContextEntry>) {
+pub(crate) fn remove_orphan_outputs<F>(items: &mut Vec<ResponseItem>, mut on_remove: F)
+where
+    F: FnMut(usize, &ResponseItem),
+{
     let function_call_ids: HashSet<String> = items
         .iter()
-        .filter_map(|i| match &i.item {
+        .filter_map(|i| match i {
             ResponseItem::FunctionCall { call_id, .. } => Some(call_id.clone()),
             _ => None,
         })
@@ -116,7 +114,7 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ContextEntry>) {
 
     let local_shell_call_ids: HashSet<String> = items
         .iter()
-        .filter_map(|i| match &i.item {
+        .filter_map(|i| match i {
             ResponseItem::LocalShellCall {
                 call_id: Some(call_id),
                 ..
@@ -127,112 +125,122 @@ pub(crate) fn remove_orphan_outputs(items: &mut Vec<ContextEntry>) {
 
     let custom_tool_call_ids: HashSet<String> = items
         .iter()
-        .filter_map(|i| match &i.item {
+        .filter_map(|i| match i {
             ResponseItem::CustomToolCall { call_id, .. } => Some(call_id.clone()),
             _ => None,
         })
         .collect();
 
-    items.retain(|entry| match &entry.item {
-        ResponseItem::FunctionCallOutput { call_id, .. } => {
-            let call_id_ref = call_id.as_str();
-            let has_match = function_call_ids.contains(call_id_ref)
-                || local_shell_call_ids.contains(call_id_ref);
-            if !has_match {
-                error_or_panic(format!(
-                    "Orphan function call output for call id: {call_id}"
-                ));
+    let mut index = 0;
+    while index < items.len() {
+        let remove_item = match &items[index] {
+            ResponseItem::FunctionCallOutput { call_id, .. } => {
+                let has_match =
+                    function_call_ids.contains(call_id) || local_shell_call_ids.contains(call_id);
+                if !has_match {
+                    error_or_panic(format!(
+                        "Orphan function call output for call id: {call_id}"
+                    ));
+                }
+                !has_match
             }
-            has_match
-        }
-        ResponseItem::CustomToolCallOutput { call_id, .. } => {
-            let has_match = custom_tool_call_ids.contains(call_id.as_str());
-            if !has_match {
-                error_or_panic(format!(
-                    "Orphan custom tool call output for call id: {call_id}"
-                ));
+            ResponseItem::CustomToolCallOutput { call_id, .. } => {
+                let has_match = custom_tool_call_ids.contains(call_id);
+                if !has_match {
+                    error_or_panic(format!(
+                        "Orphan custom tool call output for call id: {call_id}"
+                    ));
+                }
+                !has_match
             }
-            has_match
+            _ => false,
+        };
+
+        if remove_item {
+            on_remove(index, &items[index]);
+            items.remove(index);
+        } else {
+            index += 1;
         }
-        _ => true,
-    });
+    }
 }
 
-pub(crate) fn remove_corresponding_for(items: &mut Vec<ContextEntry>, item: &ResponseItem) {
+pub(crate) fn remove_corresponding_for<F>(
+    items: &mut Vec<ResponseItem>,
+    item: &ResponseItem,
+    mut on_remove: F,
+) where
+    F: FnMut(usize, &ResponseItem),
+{
     match item {
         ResponseItem::FunctionCall { call_id, .. } => {
-            remove_first_matching(items, |item| {
+            remove_first_matching(items, |idx, i| {
                 matches!(
-                    item,
+                    i,
                     ResponseItem::FunctionCallOutput {
-                        call_id: existing,
-                        ..
+                        call_id: existing, ..
                     } if existing == call_id
                 )
+                .then(|| on_remove(idx, i))
             });
         }
         ResponseItem::FunctionCallOutput { call_id, .. } => {
-            if let Some(pos) = items.iter().position(|entry| {
-                matches!(
-                    &entry.item,
-                    ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id
-                )
+            if let Some(pos) = items.iter().position(|i| {
+                matches!(i, ResponseItem::FunctionCall { call_id: existing, .. } if existing == call_id)
             }) {
+                on_remove(pos, &items[pos]);
                 items.remove(pos);
-            } else if let Some(pos) = items.iter().position(|entry| {
-                matches!(
-                    &entry.item,
-                    ResponseItem::LocalShellCall {
-                        call_id: Some(existing),
-                        ..
-                    } if existing == call_id
-                )
+            } else if let Some(pos) = items.iter().position(|i| {
+                matches!(i, ResponseItem::LocalShellCall { call_id: Some(existing), .. } if existing == call_id)
             }) {
+                on_remove(pos, &items[pos]);
                 items.remove(pos);
             }
         }
         ResponseItem::CustomToolCall { call_id, .. } => {
-            remove_first_matching(items, |item| {
+            remove_first_matching(items, |idx, i| {
                 matches!(
-                    item,
+                    i,
                     ResponseItem::CustomToolCallOutput {
-                        call_id: existing,
-                        ..
+                        call_id: existing, ..
                     } if existing == call_id
                 )
+                .then(|| on_remove(idx, i))
             });
         }
         ResponseItem::CustomToolCallOutput { call_id, .. } => {
-            remove_first_matching(items, |item| {
-                matches!(
-                    item,
-                    ResponseItem::CustomToolCall { call_id: existing, .. } if existing == call_id
-                )
+            remove_first_matching(items, |idx, i| {
+                matches!(i, ResponseItem::CustomToolCall { call_id: existing, .. } if existing == call_id)
+                    .then(|| on_remove(idx, i))
             });
         }
         ResponseItem::LocalShellCall {
             call_id: Some(call_id),
             ..
         } => {
-            remove_first_matching(items, |item| {
+            remove_first_matching(items, |idx, i| {
                 matches!(
-                    item,
+                    i,
                     ResponseItem::FunctionCallOutput {
-                        call_id: existing,
-                        ..
+                        call_id: existing, ..
                     } if existing == call_id
                 )
+                .then(|| on_remove(idx, i))
             });
         }
         _ => {}
     }
 }
 
-fn remove_first_matching<F>(items: &mut Vec<ContextEntry>, predicate: F)
+fn remove_first_matching<F>(items: &mut Vec<ResponseItem>, mut predicate: F)
 where
-    F: Fn(&ResponseItem) -> bool,
+    F: FnMut(usize, &ResponseItem) -> Option<()>,
 {
-    if let Some(pos) = items.iter().position(|entry| predicate(&entry.item)) {
+    if let Some(pos) = items
+        .iter()
+        .enumerate()
+        .find_map(|(idx, item)| predicate(idx, item).map(|_| idx))
+    {
         items.remove(pos);
     }
 }

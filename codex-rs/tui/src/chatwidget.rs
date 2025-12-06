@@ -1801,8 +1801,9 @@ impl ChatWidget {
             EventMsg::ExitedReviewMode(review) => self.on_exited_review_mode(review),
             EventMsg::ContextCompacted(_) => self.on_agent_message("Context compacted".to_owned()),
             EventMsg::GetPromptContextResponse(ev) => {
-                self.app_event_tx
-                    .send(AppEvent::OpenPromptContext { items: ev.items });
+                self.app_event_tx.send(AppEvent::OpenPromptContext {
+                    tree: Some(ev.tree),
+                });
             }
             EventMsg::UpdatePromptContextResponse(_) => {
                 // No UI action required; selections persisted server-side.

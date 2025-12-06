@@ -1127,6 +1127,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-context-tree"
+version = "0.0.0"
+dependencies = [
+ "async-recursion",
+ "async-trait",
+ "codex-protocol",
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
+]
+
+[[package]]
 name = "codex-core"
 version = "0.0.0"
 dependencies = [
@@ -1144,6 +1158,7 @@ dependencies = [
  "codex-apply-patch",
  "codex-arg0",
  "codex-async-utils",
+ "codex-context-tree",
  "codex-core",
  "codex-execpolicy",
  "codex-file-search",

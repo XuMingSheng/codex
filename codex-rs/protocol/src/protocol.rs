@@ -213,9 +213,7 @@ pub enum Op {
     GetPromptContext,
 
     /// Update selection for prompt-context items so UIs can persist user choices.
-    UpdatePromptContextSelection {
-        selections: Vec<PromptContextSelection>,
-    },
+    UpdatePromptContext { actions: PromptContextActions },
 }
 
 /// Determines the conditions under which the user is consulted to approve
@@ -1688,20 +1686,33 @@ pub enum TurnAbortReason {
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct PromptContextResponseEvent {
-    pub items: Vec<PromptContextItem>,
+    #[ts(type = "PromptContextTree")]
+    pub tree: PromptContextTree,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
-pub struct PromptContextItem {
-    pub id: i64,
-    pub selected: bool,
-    pub item: ResponseItem,
+pub struct PromptContextTree {
+    pub root: PromptContextNode,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
-pub struct PromptContextSelection {
-    pub id: i64,
+pub struct PromptContextNode {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub labels: Vec<String>,
+    pub title: String,
+    pub summary: String,
     pub selected: bool,
+    #[serde(default)]
+    pub collapsed: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<PromptContextNode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
+pub struct PromptContextActions {
+    pub toggle_selected: Vec<String>,
+    pub toggle_collapsed: Vec<String>,
 }
 
 #[cfg(test)]

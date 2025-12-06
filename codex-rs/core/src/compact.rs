@@ -74,6 +74,7 @@ async fn run_compact_task_inner(
     history.record_items(
         &[initial_input_for_turn.into()],
         turn_context.truncation_policy,
+        None,
     );
 
     let mut truncated_count = 0usize;

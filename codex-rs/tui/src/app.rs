@@ -870,8 +870,8 @@ impl App {
                     ));
                 }
             },
-            AppEvent::OpenPromptContext { items } => {
-                context_overlay_handler::open_context_overlay(&mut self.overlay, tui, items);
+            AppEvent::OpenPromptContext { tree } => {
+                context_overlay_handler::open_context_overlay(&mut self.overlay, tui, tree);
             }
         }
         Ok(true)
