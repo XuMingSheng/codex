@@ -27,6 +27,7 @@ Use this overlay to review the prompt context tree rooted at your session before
 
 2. **Build the binary.**  
    ```bash
+   cd dirct-codex/codex-rs
    cargo build --release --bin codex
    ```
    After it finishes, you can copy the produced `target/release/codex` executable elsewhere (for example, into another workspace or a location on your PATH) and start it from that directory without rebuilding.
