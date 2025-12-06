@@ -22,6 +22,7 @@ pub enum SlashCommand {
     Diff,
     Mention,
     Status,
+    Context,
     Mcp,
     Logout,
     Quit,
@@ -51,6 +52,7 @@ impl SlashCommand {
             SlashCommand::Logout => "log out of Codex",
             SlashCommand::Rollout => "print the rollout file path",
             SlashCommand::TestApproval => "test approval request",
+            SlashCommand::Context => "inspect the prompt context before the next turn",
         }
     }
 
@@ -74,6 +76,7 @@ impl SlashCommand {
             SlashCommand::Diff
             | SlashCommand::Mention
             | SlashCommand::Status
+            | SlashCommand::Context
             | SlashCommand::Mcp
             | SlashCommand::Feedback
             | SlashCommand::Quit

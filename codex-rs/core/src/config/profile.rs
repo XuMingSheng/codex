@@ -15,6 +15,8 @@ pub struct ConfigProfile {
     /// The key in the `model_providers` map identifying the
     /// [`ModelProviderInfo`] to use.
     pub model_provider: Option<String>,
+    pub ctx_model: Option<String>,
+    pub ctx_model_provider: Option<String>,
     pub approval_policy: Option<AskForApproval>,
     pub sandbox_mode: Option<SandboxMode>,
     pub model_reasoning_effort: Option<ReasoningEffort>,
@@ -25,7 +27,6 @@ pub struct ConfigProfile {
     pub experimental_compact_prompt_file: Option<PathBuf>,
     pub include_apply_patch_tool: Option<bool>,
     pub experimental_use_unified_exec_tool: Option<bool>,
-    pub experimental_use_exec_command_tool: Option<bool>,
     pub experimental_use_rmcp_client: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
     pub experimental_sandbox_command_assessment: Option<bool>,
@@ -34,6 +35,7 @@ pub struct ConfigProfile {
     /// Optional feature toggles scoped to this profile.
     #[serde(default)]
     pub features: Option<crate::features::FeaturesToml>,
+    pub oss_provider: Option<String>,
 }
 
 impl From<ConfigProfile> for codex_app_server_protocol::Profile {

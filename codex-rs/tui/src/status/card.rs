@@ -28,11 +28,13 @@ use super::helpers::format_tokens_compact;
 use super::rate_limits::RateLimitSnapshotDisplay;
 use super::rate_limits::StatusRateLimitData;
 use super::rate_limits::StatusRateLimitRow;
+use super::rate_limits::StatusRateLimitValue;
 use super::rate_limits::compose_rate_limit_data;
 use super::rate_limits::format_status_limit_summary;
 use super::rate_limits::render_status_limit_progress_bar;
 use crate::wrapping::RtOptions;
 use crate::wrapping::word_wrap_lines;
+use codex_core::AuthManager;
 
 #[derive(Debug, Clone)]
 struct StatusContextWindowData {
@@ -53,6 +55,7 @@ pub(crate) struct StatusTokenUsageData {
 struct StatusHistoryCell {
     model_name: String,
     model_details: Vec<String>,
+    context_model_display: String,
     directory: PathBuf,
     approval: String,
     sandbox: String,
@@ -65,6 +68,7 @@ struct StatusHistoryCell {
 
 pub(crate) fn new_status_output(
     config: &Config,
+    auth_manager: &AuthManager,
     total_usage: &TokenUsage,
     context_usage: Option<&TokenUsage>,
     session_id: &Option<ConversationId>,
@@ -74,6 +78,7 @@ pub(crate) fn new_status_output(
     let command = PlainHistoryCell::new(vec!["/status".magenta().into()]);
     let card = StatusHistoryCell::new(
         config,
+        auth_manager,
         total_usage,
         context_usage,
         session_id,
@@ -87,6 +92,7 @@ pub(crate) fn new_status_output(
 impl StatusHistoryCell {
     fn new(
         config: &Config,
+        auth_manager: &AuthManager,
         total_usage: &TokenUsage,
         context_usage: Option<&TokenUsage>,
         session_id: &Option<ConversationId>,
@@ -95,6 +101,17 @@ impl StatusHistoryCell {
     ) -> Self {
         let config_entries = create_config_summary_entries(config);
         let (model_name, model_details) = compose_model_display(config, &config_entries);
+        let context_model_display = {
+            let provider = config
+                .context_model_provider_id
+                .as_deref()
+                .unwrap_or(&config.model_provider_id);
+            if let Some(ctx_model) = &config.context_model {
+                format!("{ctx_model} (provider: {provider})")
+            } else {
+                format!("same as {} (provider: {provider})", config.model.as_str())
+            }
+        };
         let approval = config_entries
             .iter()
             .find(|(k, _)| *k == "approval")
@@ -106,7 +123,7 @@ impl StatusHistoryCell {
             SandboxPolicy::WorkspaceWrite { .. } => "workspace-write".to_string(),
         };
         let agents_summary = compose_agents_summary(config);
-        let account = compose_account_display(config);
+        let account = compose_account_display(auth_manager);
         let session_id = session_id.as_ref().map(std::string::ToString::to_string);
         let context_window = config.model_context_window.and_then(|window| {
             context_usage.map(|usage| StatusContextWindowData {
@@ -127,6 +144,7 @@ impl StatusHistoryCell {
         Self {
             model_name,
             model_details,
+            context_model_display,
             directory: config.cwd.clone(),
             approval,
             sandbox,
@@ -211,28 +229,44 @@ impl StatusHistoryCell {
         let mut lines = Vec::with_capacity(rows.len().saturating_mul(2));
 
         for row in rows {
-            let value_spans = vec![
-                Span::from(render_status_limit_progress_bar(row.percent_used)),
-                Span::from(" "),
-                Span::from(format_status_limit_summary(row.percent_used)),
-            ];
-            let base_spans = formatter.full_spans(row.label.as_str(), value_spans);
-            let base_line = Line::from(base_spans.clone());
+            match &row.value {
+                StatusRateLimitValue::Window {
+                    percent_used,
+                    resets_at,
+                } => {
+                    let percent_remaining = (100.0 - percent_used).clamp(0.0, 100.0);
+                    let value_spans = vec![
+                        Span::from(render_status_limit_progress_bar(percent_remaining)),
+                        Span::from(" "),
+                        Span::from(format_status_limit_summary(percent_remaining)),
+                    ];
+                    let base_spans = formatter.full_spans(row.label.as_str(), value_spans);
+                    let base_line = Line::from(base_spans.clone());
 
-            if let Some(resets_at) = row.resets_at.as_ref() {
-                let resets_span = Span::from(format!("(resets {resets_at})")).dim();
-                let mut inline_spans = base_spans.clone();
-                inline_spans.push(Span::from(" ").dim());
-                inline_spans.push(resets_span.clone());
+                    if let Some(resets_at) = resets_at.as_ref() {
+                        let resets_span = Span::from(format!("(resets {resets_at})")).dim();
+                        let mut inline_spans = base_spans.clone();
+                        inline_spans.push(Span::from(" ").dim());
+                        inline_spans.push(resets_span.clone());
 
-                if line_display_width(&Line::from(inline_spans.clone())) <= available_inner_width {
-                    lines.push(Line::from(inline_spans));
-                } else {
-                    lines.push(base_line);
-                    lines.push(formatter.continuation(vec![resets_span]));
+                        if line_display_width(&Line::from(inline_spans.clone()))
+                            <= available_inner_width
+                        {
+                            lines.push(Line::from(inline_spans));
+                        } else {
+                            lines.push(base_line);
+                            lines.push(formatter.continuation(vec![resets_span]));
+                        }
+                    } else {
+                        lines.push(base_line);
+                    }
                 }
-            } else {
-                lines.push(base_line);
+                StatusRateLimitValue::Text(text) => {
+                    let label = row.label.clone();
+                    let spans =
+                        formatter.full_spans(label.as_str(), vec![Span::from(text.clone())]);
+                    lines.push(Line::from(spans));
+                }
             }
         }
 
@@ -289,11 +323,17 @@ impl HistoryCell for StatusHistoryCell {
             }
         });
 
-        let mut labels: Vec<String> =
-            vec!["Model", "Directory", "Approval", "Sandbox", "Agents.md"]
-                .into_iter()
-                .map(str::to_string)
-                .collect();
+        let mut labels: Vec<String> = vec![
+            "Model",
+            "Context model",
+            "Directory",
+            "Approval",
+            "Sandbox",
+            "Agents.md",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
         let mut seen: BTreeSet<String> = labels.iter().cloned().collect();
 
         if account_value.is_some() {
@@ -338,6 +378,10 @@ impl HistoryCell for StatusHistoryCell {
         let directory_value = format_directory_display(&self.directory, Some(value_width));
 
         lines.push(formatter.line("Model", model_spans));
+        lines.push(formatter.line(
+            "Context model",
+            vec![Span::from(self.context_model_display.clone())],
+        ));
         lines.push(formatter.line("Directory", vec![Span::from(directory_value)]));
         lines.push(formatter.line("Approval", vec![Span::from(self.approval.clone())]));
         lines.push(formatter.line("Sandbox", vec![Span::from(self.sandbox.clone())]));

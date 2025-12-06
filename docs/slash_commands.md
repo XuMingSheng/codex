@@ -22,6 +22,7 @@ Control Codex’s behavior during an interactive session with slash commands.
 | `/diff`      | show git diff (including untracked files)                   |
 | `/mention`   | mention a file                                              |
 | `/status`    | show current session configuration and token usage          |
+| `/context`   | inspect and choose the prompt context before the next turn |
 | `/mcp`       | list configured MCP tools                                   |
 | `/logout`    | log out of Codex                                            |
 | `/quit`      | exit Codex                                                  |

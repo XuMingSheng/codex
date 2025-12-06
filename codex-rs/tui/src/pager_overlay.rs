@@ -2,6 +2,7 @@ use std::io::Result;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::context_overlay::ContextOverlay;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::key_hint;
@@ -12,6 +13,7 @@ use crate::render::renderable::Renderable;
 use crate::style::user_message_style;
 use crate::tui;
 use crate::tui::TuiEvent;
+use codex_protocol::protocol::PromptContextTree;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
@@ -31,6 +33,7 @@ use ratatui::widgets::Wrap;
 pub(crate) enum Overlay {
     Transcript(TranscriptOverlay),
     Static(StaticOverlay),
+    Context(ContextOverlay),
 }
 
 impl Overlay {
@@ -53,13 +56,19 @@ impl Overlay {
         match self {
             Overlay::Transcript(o) => o.handle_event(tui, event),
             Overlay::Static(o) => o.handle_event(tui, event),
+            Overlay::Context(o) => o.handle_event(tui, event),
         }
+    }
+
+    pub(crate) fn new_context(tree: Option<PromptContextTree>) -> Self {
+        Self::Context(ContextOverlay::new(tree))
     }
 
     pub(crate) fn is_done(&self) -> bool {
         match self {
             Overlay::Transcript(o) => o.is_done(),
             Overlay::Static(o) => o.is_done(),
+            Overlay::Context(o) => o.is_done(),
         }
     }
 }
@@ -579,6 +588,7 @@ fn render_offset_content(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_core::protocol::ExecCommandSource;
     use codex_core::protocol::ReviewDecision;
     use insta::assert_snapshot;
     use std::collections::HashMap;
@@ -719,7 +729,9 @@ mod tests {
             "exec-1".into(),
             vec!["bash".into(), "-lc".into(), "ls".into()],
             vec![ParsedCommand::Unknown { cmd: "ls".into() }],
-            false,
+            ExecCommandSource::Agent,
+            None,
+            true,
         );
         exec_cell.complete_call(
             "exec-1",
